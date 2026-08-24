@@ -94,6 +94,11 @@ int server::processevents(epoll_event& event) {
 
     if (currentconn!= nullptr && currentconn->alive == false) return 0;
     if (event.events & (EPOLLERR | EPOLLHUP)) {
+        if (currentconn == nullptr) {
+            int errnum = errno;
+            LOGERRORNUM(errnum,"Listner error!");
+            return -1; //listener error, fatal
+        }
         handlemessage(currentconn); //handle any pending messages
         markdead(currentconn);
         return 0;
@@ -181,6 +186,8 @@ int server::processevents(epoll_event& event) {
 
                     //first check affordability and then only deduct
                     if (ippointer->tb.tokens < 1 || ippointer->count == serverfields::MAXipconcurrentusers) {
+                        //deduct on failure too, since it cost server work
+                        ippointer->tb.tokens = std::clamp(ippointer->tb.tokens - serverfields::accepttokencost,0.0,ippointer->tb.capacity);
                         close(newfd);
                         continue;
                     }
@@ -403,6 +410,11 @@ void server::reap() {
     }
     toremove.clear();
 
+    //safety check, moved to bottom because markdead decrements that unauth/auth counts
+    //eagerly. originally at the top is would abort instantly since connections were not removed
+    //above IP sweep so that the ASSERT fires every reap cycle
+    SERVERASSERT(static_cast<size_t>(authconncount + unauthconncount) == connectionsmap.size());
+
     if (now() - lastipsweeptime < serverfields::ipsweepinterval) return;
     lastipsweeptime = now();
     //the following sweep is for IP whose connection count reached 0 but at the moment
@@ -416,10 +428,6 @@ void server::reap() {
             it++;
         }
     }
-
-    //safety check, moved to bottom because markdead decrements that unauth/auth counts
-    //eagerly. originally at the top is would abort instantly since connections were not removed
-    SERVERASSERT(static_cast<size_t>(authconncount + unauthconncount) == connectionsmap.size());
 }
 
 void server::changestate(connection * conn,serverfields::connstates newstate) {
