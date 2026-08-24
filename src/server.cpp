@@ -78,7 +78,8 @@ void server::run() {
 
         for (int i = 0; i < events; i++) {
             epoll_event& event = eventbuffer[i];
-            processevents(event);
+            int processresult = processevents(event);
+            if (processresult == -1) return;
         }
 
         reap();
@@ -91,8 +92,8 @@ void server::run() {
 int server::processevents(epoll_event& event) {
     connection * currentconn = static_cast<connection *>(event.data.ptr);
 
-    if (currentconn!= nullptr && currentconn->alive == false) return -1;
-    if (event.events & (EPOLLERR || EPOLLHUP)) {
+    if (currentconn!= nullptr && currentconn->alive == false) return 0;
+    if (event.events & (EPOLLERR | EPOLLHUP)) {
         handlemessage(currentconn); //handle any pending messages
         markdead(currentconn);
         return 0;
@@ -178,13 +179,17 @@ int server::processevents(epoll_event& event) {
                     //does not affect new IP, since tokens are already at maximum
                     essential::updatetokens(ippointer->tb,now());
 
-                    ippointer->tb.tokens = std::clamp(ippointer->tb.tokens - serverfields::accepttokencost,0.0,ippointer->tb.capacity); 
+                    //first check affordability and then only deduct
                     if (ippointer->tb.tokens < 1 || ippointer->count == serverfields::MAXipconcurrentusers) {
                         close(newfd);
                         continue;
                     }
+                    ippointer->tb.tokens = std::clamp(ippointer->tb.tokens - serverfields::accepttokencost,0.0,ippointer->tb.capacity);
 
-                    if (setnonblocking(newfd) == false) return -1;
+                    if (setnonblocking(newfd) == false) {
+                        close(newfd);
+                        continue;
+                    }
 
                     epoll_event newclient;
                     newclient.events = EPOLLIN;
@@ -199,7 +204,6 @@ int server::processevents(epoll_event& event) {
                     newconn->readindex = 0;
                     newconn->writeindex = 0;
                     
-                    changestate(newconn->state,serverfields::connstates::UNAUTH);
                     newconn->lastseen = now();
 
                     filltag(newconn->tag,sizeof newconn->tag,newconn->connaddr,newconn->connid);
@@ -221,10 +225,13 @@ int server::processevents(epoll_event& event) {
                     }
 
                     ippointer->count += 1;
+                    //shifted to post ctl add success to prevent unauthcount from leaking
+                    changestate(newconn.get(),serverfields::connstates::UNAUTH);
+                    unauthqueue.push(clientsid);
+
                     auto [connit,conninserted] = connectionsmap.try_emplace(clientsid,nullptr);
                     SERVERASSERT(conninserted == true); //since clientsid is incremented per client, for a new conn, the entry cannot exist
                     connit->second = std::move(newconn);
-            
                     clientsid++;
                 }
             }
@@ -329,8 +336,7 @@ void server::handlemessage(connection * c) {
 
 }
 //MARKDEAD NEVER DELETES, just sets alive to false
-//Deletion only happens in toreap(). any method during processevents always
-//gets a valid raw pointer
+//Deletion only happens in toreap(). any method during processevents always gets a valid raw pointer
 void server::markdead(connection * c) {
     if (c->alive == false) return; //some previous event in the batch already marked this client dead
     c->alive = false;
@@ -344,14 +350,14 @@ void server::markdead(connection * c) {
     essential::updatetokens(pit->second->tb,now());
     if (pit->second->count == 0 && pit->second->tb.tokens == pit->second->tb.capacity) ipmap.erase(pit); //oppurtunistic early cleanup
     toremove.push_back(c->connid);
+    changestate(c,serverfields::connstates::DEAD);
 
-    LOGINFO("Client(%s) markded dead!",c->tag);
+    LOGINFO("Client(%s) marked dead!",c->tag);
 }
 
 void server::reap() {
-    //safety check
-    SERVERASSERT(authconncount + unauthconncount == connectionsmap.size());
 
+    uint64_t unauthnow = now();
     while (!unauthqueue.empty()) {
         uint64_t& id = unauthqueue.front();
         auto it = connectionsmap.find(id);
@@ -370,7 +376,7 @@ void server::reap() {
         else if (it->second->state != serverfields::connstates::UNAUTH) {
             unauthqueue.pop();
         }
-        else if ((now() - it->second->lastseen) > serverfields::authtimeout) {
+        else if ((unauthnow - it->second->lastseen) > serverfields::authtimeout) {
             markdead(it->second.get());
             unauthqueue.pop();
         }
@@ -410,17 +416,29 @@ void server::reap() {
             it++;
         }
     }
+
+    //safety check, moved to bottom because markdead decrements that unauth/auth counts
+    //eagerly. originally at the top is would abort instantly since connections were not removed
+    SERVERASSERT(static_cast<size_t>(authconncount + unauthconncount) == connectionsmap.size());
 }
 
-void server::changestate(serverfields::connstates& tochange,serverfields::connstates newstate) {
+void server::changestate(connection * conn,serverfields::connstates newstate) {
+    serverfields::connstates tochange = conn->state;
     if (tochange == serverfields::connstates::NONE && newstate == serverfields::connstates::UNAUTH) {
-        tochange = newstate;
+        conn->state = newstate;
         unauthconncount++;
     }
     else if (tochange == serverfields::connstates::UNAUTH && newstate == serverfields::connstates::IDLE) {
-        tochange = newstate;
+        conn->state = newstate;
         unauthconncount--;
         authconncount++;
     }
+    else if (tochange == serverfields::connstates::UNAUTH && newstate == serverfields::connstates::DEAD) {
+        conn->state = newstate;
+        unauthconncount--;
+    }
+    else if (tochange != serverfields::connstates::UNAUTH && newstate == serverfields::connstates::DEAD) {
+        conn->state = newstate;
+        authconncount--;
+    }
 }
-//no one's gonna hurt you love
