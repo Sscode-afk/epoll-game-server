@@ -31,4 +31,7 @@ struct connection {
 
     serverfields::connstates state = serverfields::connstates::NONE;
     uint64_t lastseen;
+
+    connection * next = nullptr;
+    connection * prev = nullptr;
 };

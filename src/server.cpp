@@ -60,6 +60,10 @@ bool server::init() {
         LOGERRORNUM(errnum,"listener epoll_ctl_add err!");
         return false;
     }
+
+    head.next = &tail;
+    tail.prev = &head;
+
     LOGINFO("Listenerfd (%d) and Epollfd(%d) set, server init completed.",listenerfd,epollfd);
     return true;
 }
@@ -70,7 +74,7 @@ void server::run() {
         epoll_event eventbuffer[serverfields::EPEVENTbufsize];
 
         int events;
-        if ((events = epoll_wait(epollfd,eventbuffer,serverfields::EPEVENTbufsize,-1)) == -1) {
+        if ((events = epoll_wait(epollfd,eventbuffer,serverfields::EPEVENTbufsize,getepollwaittimeout())) == -1) {
             int errnum = errno;
             LOGERRORNUM(errnum,"epoll wait err!");
             return;
@@ -326,6 +330,14 @@ void server::handlemessage(connection * c) {
             markdead(c);
             return;
         }
+        //An unauth client gets linked only via an auth packet
+        //thus this client sending any other packet crashes the server during unlink
+        //due to the guard against pointer null pointer dereferencing!
+        else if (c->state != serverfields::connstates::UNAUTH){
+            //No error and valid type, any msg indicates aliveness
+            c->lastseen = now();
+            nodeshifttail(c); 
+        }
     }
 
     if (c->readindex == c->writeindex) {
@@ -357,6 +369,7 @@ void server::markdead(connection * c) {
     essential::updatetokens(pit->second->tb,now());
     if (pit->second->count == 0 && pit->second->tb.tokens == pit->second->tb.capacity) ipmap.erase(pit); //oppurtunistic early cleanup
     toremove.push_back(c->connid);
+
     changestate(c,serverfields::connstates::DEAD);
 
     LOGINFO("Client(%s) marked dead!",c->tag);
@@ -391,6 +404,14 @@ void server::reap() {
     }
     //ORDERING MATTERS ABOVE! LASTSEEN ACCESS IN QUEUE IS ONLY FOR UNAUTH CONNECTIONS
     //THE SAME FIELD IS USED FOR UPDATING DEADLINE OF AUTH CLIENTS!
+
+    uint64_t authnow = now();
+    while (head.next != &tail) {
+        if ((authnow - head.next->lastseen) > serverfields::idletimeout) {
+            markdead(head.next);
+        }
+        else break;
+    }
 
     //IF connections will be cleared and listener is disabled
     if (!toremove.empty() && listenerdisabled) {
@@ -440,13 +461,74 @@ void server::changestate(connection * conn,serverfields::connstates newstate) {
         conn->state = newstate;
         unauthconncount--;
         authconncount++;
+        nodelink(conn);
     }
     else if (tochange == serverfields::connstates::UNAUTH && newstate == serverfields::connstates::DEAD) {
         conn->state = newstate;
         unauthconncount--;
     }
     else if (tochange != serverfields::connstates::UNAUTH && newstate == serverfields::connstates::DEAD) {
+        //currently all non unauth states are authorized
         conn->state = newstate;
+        nodeunlink(conn);
         authconncount--;
     }
+    else {
+        SERVERASSERT(false);
+    }
+}
+
+void server::nodelink(connection * nodep) {
+    SERVERASSERT((nodep->next == nullptr) && (nodep->prev == nullptr));
+    nodep->next = &tail;
+    nodep->prev = tail.prev;
+    tail.prev->next = nodep;
+    tail.prev = nodep;
+}
+
+void server::nodeunlink(connection * nodep) {
+    SERVERASSERT((nodep->next != nullptr) && (nodep->prev != nullptr));
+    nodep->next->prev = nodep->prev;
+    nodep->prev->next = nodep->next;
+    nodep->next = nullptr;
+    nodep->prev = nullptr;
+}
+
+void server::nodeshifttail(connection * nodep) {
+    if (nodep->next == &tail) { //node already at last
+        return;
+    }
+
+    nodeunlink(nodep);
+    nodelink(nodep);
+}
+
+//millisecond units
+uint64_t server::getepollwaittimeout() {
+    uint64_t currentime = now();
+    uint64_t wakeup = UINT64_MAX;
+
+    if (!unauthqueue.empty()) {
+        uint64_t& id = unauthqueue.front();
+        auto it = connectionsmap.find(id);
+        if (it != connectionsmap.end() && it->second->state == serverfields::connstates::UNAUTH) {
+            //lastseen for unauth clients is only set on promotion, so connections passing the check still
+            //refer to the correct interval!
+            uint64_t unauthdeadline = it->second->lastseen + serverfields::authtimeout;
+            if (unauthdeadline < wakeup) wakeup = unauthdeadline;
+        }
+    }
+
+    if (head.next != &tail) {
+        uint64_t authdeadline = head.next->lastseen + serverfields::idletimeout;
+        if (authdeadline < wakeup) wakeup = authdeadline;
+    }
+
+    if (wakeup == UINT64_MAX) {
+        //if no clients connected block indefinitely
+        return -1;
+    }
+    
+    if (wakeup < currentime) return 0;
+    return (static_cast<int>(wakeup - currentime));
 }

@@ -18,6 +18,8 @@ class server {
 
         bool listenerdisabled;
         std::unordered_map<uint64_t,std::unique_ptr<connection>> connectionsmap;
+        connection head;
+        connection tail;
         
         int processevents(epoll_event& event);
         void handlemessage(connection * c);
@@ -31,8 +33,13 @@ class server {
         std::unordered_map<uint32_t,std::unique_ptr<essential::IP>> ipmap;
         uint64_t lastipsweeptime;
 
-        void changestate(serverfields::connstates& tochange,serverfields::connstates newstate);
+        void changestate(connection * conn,serverfields::connstates newstate);
         void reap();
+        void nodelink(connection * nodep);
+        void nodeunlink(connection * nodep);
+        void nodeshifttail(connection * nodep);
+
+        uint64_t getepollwaittimeout();
 
     public:   
         server();

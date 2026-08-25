@@ -15,10 +15,11 @@ namespace serverfields {
     inline double accepttokencost = 1.0;
     inline uint64_t ipsweepinterval = 4000; //4 seconds
 
-    enum class connstates {NONE,UNAUTH,IDLE,INMATCH};
+    enum class connstates {NONE,UNAUTH,IDLE,INMATCH,DEAD};
 
     inline const int MAXunauthconnlimit = 2000;
     inline const int MAXauthconnlimit = 8000;
 
     inline uint64_t authtimeout = 5000; //5 seconds
+    inline uint64_t idletimeout = 5000;
 }
