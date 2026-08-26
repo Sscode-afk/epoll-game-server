@@ -212,8 +212,8 @@ int server::processevents(epoll_event& event) {
                     newconn->polloutactive = false;
                     newconn->connfd = newfd;
                     newconn->connid = clientsid;
-                    newconn->readindex = 0;
-                    newconn->writeindex = 0;
+                    newconn->rbreadindex = 0;
+                    newconn->rbwriteindex = 0;
                     
                     newconn->lastseen = now();
 
@@ -254,7 +254,9 @@ int server::processevents(epoll_event& event) {
         }
     }
     if (event.events & EPOLLOUT) {
-        //epollout logic here
+        if (currentconn->alive == true) {
+            flushwb(currentconn);
+        } 
     }
 
     return 0;
@@ -264,14 +266,14 @@ void server::handlemessage(connection * c) {
     if (c->alive == false) return;
 
     while (true) {
-        size_t remaining = serverfields::CLIENTREADbufsizemax - c->writeindex;
+        size_t remaining = serverfields::CLIENTREADbufsizemax - c->rbwriteindex;
 
         if (remaining == 0) {
             //the read buffer has filled up, break
             break;
         }
 
-        ssize_t bytes = recv(c->connfd,c->readbuffer + c->writeindex,remaining,0);
+        ssize_t bytes = recv(c->connfd,c->readbuffer + c->rbwriteindex,remaining,0);
 
         if (bytes == -1) {
             int errnum = errno;
@@ -293,7 +295,7 @@ void server::handlemessage(connection * c) {
 
         else {
             //the bytes are written to the read buffer, updating the write index
-            c->writeindex += bytes;
+            c->rbwriteindex += bytes;
         }
     }
 
@@ -303,7 +305,7 @@ void server::handlemessage(connection * c) {
         //in the odd case it doesn't (handler marks client dead and returns 0), above handles
         if (!c->alive) return;
 
-        int parseresult = parse(c->readbuffer,c->readindex,c->writeindex,c->tag);
+        int parseresult = parse(c->readbuffer,c->rbreadindex,c->rbwriteindex,c->tag);
         if (parseresult == -2) break;
 
         else if (parseresult == -1) {
@@ -340,17 +342,17 @@ void server::handlemessage(connection * c) {
         }
     }
 
-    if (c->readindex == c->writeindex) {
-        c->readindex = 0;
-        c->writeindex = 0;
+    if (c->rbreadindex == c->rbwriteindex) {
+        c->rbreadindex = 0;
+        c->rbwriteindex = 0;
     }
 
-    if (c->readindex > 0) {
+    if (c->rbreadindex > 0) {
         //this branch will run if incomplete messages are present in the readbuffer.
-        size_t tomove = c->writeindex - c->readindex;
-        memmove(c->readbuffer,c->readbuffer+c->readindex,tomove);
-        c->readindex = 0;
-        c->writeindex = tomove;
+        size_t tomove = c->rbwriteindex - c->rbreadindex;
+        memmove(c->readbuffer,c->readbuffer+c->rbreadindex,tomove);
+        c->rbreadindex = 0;
+        c->rbwriteindex = tomove;
     }
 
 }
@@ -396,7 +398,7 @@ void server::reap() {
         else if (it->second->state != serverfields::connstates::UNAUTH) {
             unauthqueue.pop();
         }
-        else if ((unauthnow - it->second->lastseen) > serverfields::authtimeout) {
+        else if ((unauthnow - it->second->lastseen) >= serverfields::authtimeout) {
             markdead(it->second.get());
             unauthqueue.pop();
         }
@@ -407,7 +409,8 @@ void server::reap() {
 
     uint64_t authnow = now();
     while (head.next != &tail) {
-        if ((authnow - head.next->lastseen) > serverfields::idletimeout) {
+        //equality ensures that epoll_wait deadline arithmetic agrees with one below
+        if ((authnow - head.next->lastseen) >= serverfields::idletimeout) {
             markdead(head.next);
         }
         else break;
@@ -504,7 +507,7 @@ void server::nodeshifttail(connection * nodep) {
 }
 
 //millisecond units
-uint64_t server::getepollwaittimeout() {
+int server::getepollwaittimeout() {
     uint64_t currentime = now();
     uint64_t wakeup = UINT64_MAX;
 
@@ -531,4 +534,75 @@ uint64_t server::getepollwaittimeout() {
     
     if (wakeup < currentime) return 0;
     return (static_cast<int>(wakeup - currentime));
+}
+
+void server::setepollout(connection * c,bool yes) {
+    if (yes != c->polloutactive) return;
+
+    epoll_event ev;
+    ev.data.ptr = c;
+
+    if (yes) {
+        ev.events = EPOLLIN | EPOLLOUT;
+        c->polloutactive = true;
+    }
+    else {
+        ev.events = EPOLLIN;
+        c->polloutactive = false;
+    }
+
+    if (epoll_ctl(epollfd,EPOLL_CTL_MOD,c->connfd,&ev) == -1) {
+        int errnum = errno;
+        LOGERRORNUM(errnum,"Failed setting EPOLLOUT, closing client!");
+        markdead(c);
+    }
+}
+
+void server::flushwb(connection * c) {
+    SERVERASSERT(c->alive == true); //This method only operates on alive clients, it is the caller's responsibility to ensure so
+    size_t tosend = c->wbwriteindex - c->wbsentindex;
+    
+    if (tosend == 0) return; //EPOLLOUT flushing when EPOLLIN before cleared the buffer already
+    ssize_t bytessent = send(c->connfd,c->writebuffer + c->wbsentindex,tosend,MSG_NOSIGNAL);
+    if (bytessent == -1) {
+        int errnum = errno;
+        if (errnum == EAGAIN || errnum == EWOULDBLOCK) {
+            //send buffer is full
+            setepollout(c,true);
+            return;
+        }
+        else {
+            markdead(c);
+            return;
+        }
+    }
+    
+    if (static_cast<size_t>(bytessent) < tosend) {
+        c->wbsentindex += bytessent;
+        memmove(c->writebuffer,c->writebuffer + c->wbsentindex,c->wbwriteindex - c->wbsentindex);
+        setepollout(c,true);
+
+    }
+    else if (bytessent == tosend) {
+        c->wbsentindex = 0;
+        c->wbwriteindex = 0;
+        setepollout(c,false);
+    }
+}
+
+template<typename Payload>
+void server::sendmessage(connection * c,Payload& data) {
+    uint32_t payloadsize = sizeof data;
+    size_t remaining = serverfields::CLIENTWRITEbufsizemax - c->wbwriteindex;
+
+    if (remaining < (payloadsize + 4)) {
+        markdead(c);
+        return;
+    }
+
+    memcpy(c->writebuffer + c->wbwriteindex,&payloadsize,sizeof payloadsize);
+    c->wbwriteindex += sizeof payloadsize;
+
+    memcpy(c->writebuffer + c->wbwriteindex,&data,payloadsize);
+    c->wbwriteindex += payloadsize;
 }

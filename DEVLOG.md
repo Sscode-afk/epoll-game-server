@@ -110,8 +110,38 @@ I realise this will not work for heartbeat packets though...will have to see abo
 ## 21/08/26
 
 One of the consequences of having deferred deletion is the absolute invariant that during processing of a batch of events in the event loop, every single non listener (or connection) `data.ptr` is NOT stale.
-this is due to the fact that the connection objects on the heap are only ever removed in `toreap()`, markdead never deletes and only sets alive = false.
+this is due to the fact that the connection objects on the heap are only ever removed in `reap()`, markdead never deletes and only sets alive = false.
 so accessing the alive field of the connection object to stop further processing if not alive allows every method in processevents to directly take a raw pointer to the connection object as its parameter. this saves redundant lookups inside connectionsmap since by design, they are guaranteed to be present. so the invariant and the alive checks are doing a lot of heavy lifting.
 
-markdead also follows above principle, every markdead call within processevents or even in `toreap()` is **BEFORE** the actual toremove iteration removal.
+markdead also follows above principle, every markdead call within processevents or even in `reap()` is **BEFORE** the actual toremove iteration removal.
 read up on the doubly linked list implementation for inactive auth client cleanup, will be implementing it next...
+
+## 26/08/26
+
+Slow progress, was occupied with other work. Implemented the **intrusive doubly linked list** to evict authenticated (or related state) clients that have not sent a heartbeat/valid packet in some time. 
+the idea is simple: have two ****sentinel permanent nodes** that are initially on startup linked to each other. whenever a client transitions from unauth-auth, then always attach before the tail. a generic 4 pointer operation pattern ensures that we do not need to check cases of the list being empty etc. (because we only ever deal with tail, for the empty case, tail.prev is head automatically...). if a client sends a packet, then simply take their node and move it before the tail since no node is newer than a client that just notified.
+when marked dead, simply unlink the node and connect its next and prev nodes together. 
+this ensures that in `reap()`, we can just check the nodes linked to head while the list is not empty (head.next != &tail), if timed out, then unlink and check next, otherwise break. O(1).
+
+another neat thing is the intrusive part. normally to reach the node itself, one would need a hashmap, but here the **connection objects become the nodes themselves** since they contain the next and prev connection pointer. so when dealing with a connection object, we automatically have its node.
+
+with this implementation there was only one major dilemma. I learned about it and introduced it because it seemed like something worth learning and implementing. but considering the alternative was just to traverse all the connections, check how long they have not been heard from and evict/continue, that would be at most 10k operations per reap cycle. so considering an `epoll_wait` timeout of 1 second, 10k iterations per second at max capacity.
+but then considering that unlink and shift to end for a client that notified requires 8 pointer operations per msg. then if clients average 8 msg/s, then it means 80k pointer operations per second at max capacity. I realise those operations are very fast, but so is the contiguous vector iteration over a small cap like 10k?
+one small argument is the fact that maybe I would increase the max users cap in the future or reduce `epoll_wait` timeout, in which case the scan does much more work.
+nonetheless, I am keeping the DLL implementation. the natural text step is a timing wheel, but I am skipping it.
+
+with DLL implemented, I needed `epoll_wait` timeout to prevent `reap()` from only running when some event is set on some client connection.
+but a fixed timeout was bad because it meant periodic sweeps even when there is noone in the unauth queue or the list.
+so the better alternative is to actually have a **dynamic timeout** based on the least expiry time between an unauth client and an auth client. 
+
+reviewing the code also led to me finding quite a few ordering bugs (for example, I had shifted state change from NONE to UNAUTH only when a new client actually passes the ctl add, but I had placed the statechange (whose method switched to accepting raw connection pointers for DLL support) below the newconn `std::move`), which again points to the fact that I need to actually start testing the server with a small client helper. 
+
+also adopting a stricter policy to keep myself sane and not keep on switching how the code flows. basically **methods operating on a connection object now have a contract on what they need to properly function**, which is implemented via a SERVERASSERT, and its the **caller's duty** to ensure that it is not violated. this makes it much more cleaner than deciding where to put checks at (in the method or at the callsite). of course this is only in regards to what the architecture says must be true and not what a hostile client can determine.
+
+the write path has been pretty straight forward till now. the same scenario of using a writepointer for how much has been written to it and a sentpointer for how much of it has actually been sent to the kernel send buffer.
+but there was an important design flaw. 
+at every `sendmessage()` site, the program checks if the message to be sent can fit inside the buffer or not via MAX - writepointer, and if not, the client is just too slow and dropped.
+`flushwb()` tries sending everything inside the buffer, and on partial sends, it increments the sendpointer and stops. this is bad design and the solution is something I already do in the readbuffer.
+the problem is that sendpointer advancing in a flushcycle on partial write, leaves unreclaimed space at the front of the buffer. if a client wants to send the entire buffer worth content but is only able to send say around 97% of it. sendpointer increments leaving 97% space at front while writepointer stays at the end.
+the next cycle, the client gets dropped due to insufficient space on message send even though space is there at the front.
+the fix is to prevent 0 byte sends at the start and `memmove` on partial writes.

@@ -23,11 +23,14 @@ struct connection {
     sockaddr_in connaddr;
 
     uint8_t readbuffer[serverfields::CLIENTREADbufsizemax];
+    size_t rbreadindex;
+    size_t rbwriteindex;
+
     uint8_t writebuffer[serverfields::CLIENTWRITEbufsizemax];
+    size_t wbwriteindex;
+    size_t wbsentindex;
 
     char tag[4 + 20 + INET_ADDRSTRLEN + 2]; //"conn {max uint64t} {maxipv4addr}\0"
-    size_t readindex;
-    size_t writeindex;
 
     serverfields::connstates state = serverfields::connstates::NONE;
     uint64_t lastseen;

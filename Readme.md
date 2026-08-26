@@ -123,7 +123,6 @@ Fixed size primitives, `__attribute__((packed))` and proper byte order conversio
 ## Not implemented yet
 
 - **Authentication.** The implementation is yet to be written. (credential verification)
-- **The write path.** No `EPOLLOUT` handling (partial writes, policy for slow clients etc.)
 - **`EPOLLERR` / `EPOLLHUP` handling.**
 - **Heartbeats** for authenticated connections.
 - **Message-level rate limiting.**
