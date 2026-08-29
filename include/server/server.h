@@ -39,7 +39,12 @@ class server {
         void nodeunlink(connection * nodep);
         void nodeshifttail(connection * nodep);
 
-        uint64_t getepollwaittimeout();
+        int getepollwaittimeout();
+
+        void setepollout(connection * c,bool yes);
+        void flushwb(connection * c);
+        template<typename Payload>
+        void sendmessage(connection * c,Payload& data);
 
     public:   
         server();
