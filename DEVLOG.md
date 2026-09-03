@@ -145,3 +145,65 @@ at every `sendmessage()` site, the program checks if the message to be sent can 
 the problem is that sendpointer advancing in a flushcycle on partial write, leaves unreclaimed space at the front of the buffer. if a client wants to send the entire buffer worth content but is only able to send say around 97% of it. sendpointer increments leaving 97% space at front while writepointer stays at the end.
 the next cycle, the client gets dropped due to insufficient space on message send even though space is there at the front.
 the fix is to prevent 0 byte sends at the start and `memmove` on partial writes.
+
+## 27-29/08/26
+
+Before implementing sessions and the database (sqlite3), I have been delving into threads. 
+The thing is that hashing and even some batch writing, read operations can be too expensive to put inside the main epoll loop as it will introduce latency for all the clients in a batch. 
+this means that a pool of threads is needed to handle expensive work. an N thread pool for hashing and a single database thread for read and batch writes.
+I realise that this adds complexity, but implementing it makes the other parts simple. 
+
+--
+Starting to implement a **threadpool and a thread safe queue structure**, and I am already having to digest alot of c++ information. 
+the queue has to be generic in the sense that it can be initialized with a generic type like a JOB struct or a RESULT struct. this can be achieved by using a template class. 
+push and pop inside the class that deals with the `queue<T>` also has to take T as a parameter.
+
+a simple push operation needs to take T as a parameter.
+3 options --> `T& job`, `T&& job`, `const T& job`
+to simplify things, all queue operations work on the contract that job cannot be an rvalue at the callsite. this is guarded by the compiler. 
+in my architecture, a job is something to simply be pushed and forgotten. 
+this means, that `const T& job` is the wrong choice because `queue.push()` cannot have `std::move` inside it as a const reference cannot be moved.
+so after acquiring the `mutex`, this version would create a deep copy which is wasteful.
+
+the T& version is good considering the contract of lvalues only, since it leads to only 1 move operation and 0 copies. but the problem with this as I learned is that, `std::move` on the reference inside `push()` essentially destroys the lvalue job in the caller. although this holds consistent with the fact that job is not required anymore regardless, a better alternative is if the callsite 'knows' that the lvalue will be gone. 
+this is possible with T&&. this version for lvalues is the same as T& but it requires the callsite to move the lvalue in the argument -> `queue.push(std::move(job))`; which signals the death of job.
+
+but all of above is virtually insignificant for the JOB struct atleast I am thinking of having. **heap allocated resources are absent from it**, this means that the copy constructor and the move constructor are identical in practice, so converting the lvalue reference to an rvalue one using `std::move` inside `push()` so as to pick the push overload that moves instead of copying is not of much help. 
+it also means that nothing really gets destroyed at the callsite, that issue only arises for heap allocated fields, but right now there are none.
+but I am keeping T&& just in case future edits start adding complex structures inside the job. 
+
+--
+
+Getting into `argon2` hashing. The idea is simple. client will send plain text username and password over the network. transport layer security is something I am not handling, so assuming security over the wire -> a login attempt is a packet send over the socket that the server always considers unauth at first.
+the login packet contains the credentials. the server loop handles login by creating a job and giving to the DB thread. now there are 2 things that can be done, either the DB thread does the fetching of the argon2 string stored on the disk and create the hashjob therein, or it returns a result, and based on the result the main loop will create a hashjob. I am not sure about the complications involved with the first method but it seems 'better' even though the second one feels 'safer and right'.
+
+the hash pool basically pops a hash job, use the password plain text and the argon id to verify if based on the same salt parameters, the password genuinely converts to the same string and then stores the result. the main loop finally reads the result and if the connection is still in connectionsmap (not timed out), it promotes it. 
+
+This comes with the understanding that from now on there will be **two types of handlers**, those that can respond immediately to the client and those that only cover the portion which handles off a job to the threads, and then continues to the next client. the other part of the handler is in the section that processes the event set by the threads on result.
+
+--
+
+Ran some **testing**. since the project is on my laptop, I will use the benchmarks produced on it, and thus all values of the hashing parameters are based off it.
+considering a HASH that takes T time, and there being N threads in the pool, it takes T seconds to complete N hashses.
+T->N
+T/N seconds to complete 1 hash.
+if the number of jobs in the hashqueue is M, then total time taken is M x (T/N).
+
+a connection that joins has a 5 second deadline to promote. this means that the hashqueue needs to have a cap on the maximum number of jobs at a time, otherwise jobs for connections long back in the queue are useless since the connection expires before they complete.
+with a 5 second deadline, M x (T/N)  < 5
+so , **M < 5 x (N/T)**
+
+T was interesting. to compute it on my laptop, I ran 1200 hashes on a fixed password on 4 threads 5 times, and:
+
+'''
+Total time taken: 108017ms.
+Average time taken: 90.0143ms.
+Median time: 88.0645ms.
+P99 time: 110.687ms.
+Longest hash took: 121.618ms.
+'''
+
+for T, P99 is the most sensible since it talks about how much time 99 percent of hashes took. at 4 threads, this means M ~< 181.
+with ~180 hash jobs, the queue is barely fully processed for the last waiting client connection job.
+so the actual cap must be comfortably smaller. I am settling for 100.
+at 100, the hashes are completed in (100 x (T/N) time) which is around 2.76 seconds, well under 5 second deadline for the last job.
