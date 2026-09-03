@@ -22,4 +22,15 @@ namespace serverfields {
 
     inline uint64_t authtimeout = 5000; //5 seconds
     inline uint64_t idletimeout = 5000;
+
+    inline constexpr size_t hashresultbufsize = 128; //asserted against the actual encoded_len
+    inline int hashpoolthreadcount = 4;
+    inline constexpr uint32_t t_cost = 3;
+    inline constexpr uint32_t m_cost = 38912;
+    inline constexpr uint32_t parallelism = 1;
+    inline constexpr uint32_t hashlen = 32;
+    inline constexpr uint32_t saltlen = 16;
+
+    inline constexpr size_t mincredentialsize = 7;
+    inline constexpr size_t maxcredentialsize = 15;
 }

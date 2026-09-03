@@ -5,6 +5,7 @@
 #include <memory>
 #include "server/corestructures.h"
 #include <queue>
+#include <threadpool.h>
 class server {
     private:
         int epollfd;
@@ -45,6 +46,9 @@ class server {
         void flushwb(connection * c);
         template<typename Payload>
         void sendmessage(connection * c,Payload& data);
+
+        hashpool hthreadpool;
+        essential::threadsafequeue<essential::hashresultentry> hashresultqueue;
 
     public:   
         server();

@@ -14,6 +14,10 @@
 #include "server/corestructures.h"
 #include "core/time.h"
 #include <algorithm>
+#include "core/threadpool.h"
+extern "C" {
+    #include <argon2.h>
+}
 
 //POLICY: MEMORY ALLOCATION FAILURES ARE LEFT UNHANDLED
 server::server() {
@@ -64,6 +68,12 @@ bool server::init() {
     head.next = &tail;
     tail.prev = &head;
 
+    size_t hashencodedbufferlen = argon2_encodedlen(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,serverfields::saltlen,serverfields::hashlen,Argon2_id);
+    SERVERASSERT(hashencodedbufferlen < serverfields::hashresultbufsize);
+
+    int threadsinit = hthreadpool.init(serverfields::hashpoolthreadcount,hashresultqueue,hashencodedbufferlen);
+    SERVERASSERT(threadsinit);
+    
     LOGINFO("Listenerfd (%d) and Epollfd(%d) set, server init completed.",listenerfd,epollfd);
     return true;
 }
@@ -606,3 +616,4 @@ void server::sendmessage(connection * c,Payload& data) {
     memcpy(c->writebuffer + c->wbwriteindex,&data,payloadsize);
     c->wbwriteindex += payloadsize;
 }
+

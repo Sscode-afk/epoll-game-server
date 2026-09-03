@@ -195,13 +195,13 @@ so , **M < 5 x (N/T)**
 
 T was interesting. to compute it on my laptop, I ran 1200 hashes on a fixed password on 4 threads 5 times, and:
 
-'''
+```
 Total time taken: 108017ms.
 Average time taken: 90.0143ms.
 Median time: 88.0645ms.
 P99 time: 110.687ms.
 Longest hash took: 121.618ms.
-'''
+```
 
 for T, P99 is the most sensible since it talks about how much time 99 percent of hashes took. at 4 threads, this means M ~< 181.
 with ~180 hash jobs, the queue is barely fully processed for the last waiting client connection job.
