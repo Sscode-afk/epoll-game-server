@@ -6,6 +6,7 @@
 #include <optional>
 #include <mutex>
 #include <cstring>
+#include <condition_variable>
 
 namespace essential {
     struct tokenbucket {
@@ -44,7 +45,7 @@ namespace essential {
             }
             else {
                 memcpy(pwdbuf,password,passlen);
-                pwdbuf[passlen] = '/0';
+                pwdbuf[passlen] = '\0';
                 jtype = type;
                 connid = id;
             }
