@@ -25,6 +25,7 @@ add_library(server_lib STATIC
     src/parser.cpp
     src/tools.cpp
     src/threadpool.cpp
+    src/handlers.cpp
 )
 
 target_include_directories(server_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -50,6 +50,7 @@ class server {
         hashpool hthreadpool;
         essential::threadsafequeue<essential::hashresultentry> hashresultqueue;
 
+        void handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtype);
     public:   
         server();
         ~server();
@@ -61,3 +62,20 @@ class server {
         void run();
 
 };
+
+template<typename Payload>
+void server::sendmessage(connection * c,Payload& data) {
+    uint32_t payloadsize = sizeof data;
+    size_t remaining = serverfields::CLIENTWRITEbufsizemax - c->wbwriteindex;
+
+    if (remaining < (payloadsize + 4)) {
+        markdead(c);
+        return;
+    }
+
+    memcpy(c->writebuffer + c->wbwriteindex,&payloadsize,sizeof payloadsize);
+    c->wbwriteindex += sizeof payloadsize;
+
+    memcpy(c->writebuffer + c->wbwriteindex,&data,payloadsize);
+    c->wbwriteindex += payloadsize;
+}

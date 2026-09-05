@@ -1,5 +1,6 @@
 #pragma once
 #include "server/serversettings.h"
+#include "proto/settings.h"
 #include <algorithm>
 #include <queue>
 #include <mutex>
@@ -37,10 +38,13 @@ namespace essential {
         uint64_t connid;
         hashpooljobtype jtype;
 
-        char pwdbuf[serverfields::maxcredentialsize + 1];
+        char pwdbuf[network::maxcredentialsize + 1];
+        char hashbuf[serverfields::hashresultbufsize];
+
+        size_t pwdlen;
 
         hashentry(char * password,size_t passlen,int& success,hashpooljobtype type,uint64_t id) {
-            if (passlen > serverfields::maxcredentialsize) {
+            if (passlen > network::maxcredentialsize) {
                 success = -1;
             }
             else {
@@ -48,6 +52,7 @@ namespace essential {
                 pwdbuf[passlen] = '\0';
                 jtype = type;
                 connid = id;
+                pwdlen = strlen(password);
             }
         }
     };

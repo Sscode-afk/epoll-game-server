@@ -311,23 +311,24 @@ void server::handlemessage(connection * c) {
 
     //now the buffer is ready to be read
     while (true) {
-        //A HANDLER MUST RETURN -1 TO DROP THE CLIENT HOLDS
-        //in the odd case it doesn't (handler marks client dead and returns 0), above handles
-        if (!c->alive) return;
-
-        int parseresult = parse(c->readbuffer,c->rbreadindex,c->rbwriteindex,c->tag);
-        if (parseresult == -2) break;
-
-        else if (parseresult == -1) {
+        //CHANGE: A handler can now markdead a connection, guard after every message handled
+        parsedata parsemsg = parse(c->readbuffer,c->rbreadindex,c->rbwriteindex);
+        
+        if (parsemsg.res == parseresult::INCOMPLETEMESSAGE) {
+            break;
+        }
+        else if (parsemsg.res == parseresult::OUTOFBOUNDSMSG) {
+            LOGWARNING("Incoming packet size out of bounds for '%s', dropping!",c->tag);
             markdead(c);
             return;
         }
+        else {
+            LOGINFO("Succesfully parsed incoming packet for '%s'!",c->tag);
+        }
 
-        //parse result dictates execution control as well as the actual type of the msg
-        int status = 0;
-        switch(parseresult) {
+        switch(parsemsg.payloadtype) {
             case 1 : {
-                status = handleauth();
+                handlesignup(c,parsemsg.payloadpointer,parsemsg.payloadsize,parsemsg.payloadtype);
                 break;
             }
             default : {
@@ -338,14 +339,11 @@ void server::handlemessage(connection * c) {
             }
         }
 
-        if (status == -1) {
-            markdead(c);
-            return;
-        }
-        //An unauth client gets linked only via an auth packet
-        //thus this client sending any other packet crashes the server during unlink
-        //due to the guard against pointer null pointer dereferencing!
-        else if (c->state != serverfields::connstates::UNAUTH){
+        if (c->alive == false) return;
+
+        //unauth client is not linked, a non-auth type packet will hit the unlink assertion
+        //check if the node is linked first
+        else if (c->next != nullptr && c->prev != nullptr){
             //No error and valid type, any msg indicates aliveness
             c->lastseen = now();
             nodeshifttail(c); 
@@ -599,21 +597,3 @@ void server::flushwb(connection * c) {
         setepollout(c,false);
     }
 }
-
-template<typename Payload>
-void server::sendmessage(connection * c,Payload& data) {
-    uint32_t payloadsize = sizeof data;
-    size_t remaining = serverfields::CLIENTWRITEbufsizemax - c->wbwriteindex;
-
-    if (remaining < (payloadsize + 4)) {
-        markdead(c);
-        return;
-    }
-
-    memcpy(c->writebuffer + c->wbwriteindex,&payloadsize,sizeof payloadsize);
-    c->wbwriteindex += sizeof payloadsize;
-
-    memcpy(c->writebuffer + c->wbwriteindex,&data,payloadsize);
-    c->wbwriteindex += payloadsize;
-}
-

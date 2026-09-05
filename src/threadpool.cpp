@@ -58,11 +58,13 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
                 continue;
             }
 
-            int encoderes = argon2id_hash_encoded(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,job.pwdbuf,sizeof job.pwdbuf,saltbuf,serverfields::saltlen,serverfields::hashlen,encodedbuffer.data(),encodedbuffer.size());
+            int encoderes = argon2id_hash_encoded(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,job.pwdbuf,job.pwdlen,saltbuf,serverfields::saltlen,serverfields::hashlen,encodedbuffer.data(),encodedbuffer.size());
             if (encoderes == ARGON2_OK) {
                 hres.result = essential::hashresultstatus::ENCODEDONE;
                 memcpy(hres.buf,encodedbuffer.data(),encodedbuffer.size());
                 resqueue.push(std::move(hres));
+
+                encodedbuffer.clear();
             }
             else {
                 hres.result = essential::hashresultstatus::ENCODEFAILED;
@@ -71,7 +73,14 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
         }
 
         else {
-           //verification logic 
+            int rs = argon2_verify(job.hashbuf,job.pwdbuf,job.pwdlen,Argon2_id);
+            if (rs == ARGON2_OK) {
+                hres.result = essential::hashresultstatus::VERIFYDONE;
+            }
+            else {
+                hres.result = essential::hashresultstatus::VERIFYFAIL;
+            }
+            resqueue.push(std::move(hres));
         }
     }
 }
