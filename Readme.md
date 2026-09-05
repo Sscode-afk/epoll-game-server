@@ -4,8 +4,8 @@ A single-threaded, event-driven TCP server built on Linux `epoll`, it is to be t
 It's written in C++17 with no dependencies beyond the standard library and POSIX.
 
 **Status: in progress.** The connection lifecycle, per-IP admission control, and logging are
-implemented. Authentication, the write path, matchmaking, and
-tests are not. See [Not implemented yet](#not-implemented-yet) for the honest list.
+implemented. 
+See [Not implemented yet](#not-implemented-yet) for what remains.
 
 This is entirely a learning project. I am a second-year CS undergraduate and this is my first major project and also the largest piece of systems code I have written. [`DEVLOG.md`](DEVLOG.md) records what I built, what broke, what was understood and what I managed to change my mind about with appropriate dates.
 
@@ -35,7 +35,7 @@ cmake --build build-asan
 ## Layout
 
 ```
-include/core/     logging, clock, formatting helpers
+include/core/     logging, clock, formatting helpers, threadpool
 include/proto/    wire format, parser, network settings
 include/server/   connection struct, server class, tunings, socket setup
 src/              implementations
@@ -122,10 +122,10 @@ Fixed size primitives, `__attribute__((packed))` and proper byte order conversio
 
 ## Not implemented yet
 
-- **Authentication.** The implementation is yet to be written. (credential verification)
-- **`EPOLLERR` / `EPOLLHUP` handling.**
+- **Authentication.** The setup is ready, not fully done
 - **Heartbeats** for authenticated connections.
 - **Message-level rate limiting.**
+- **Sessions** for reconnection.
 - **Matchmaking**, at this point, getting this right is the ultimate goal.
 - **Testing and benchmarks.** None right now. Every limit in `serversettings.h` is essentially not measured, and has only been reasoned about. so they are guesses at the moment.
 
