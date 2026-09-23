@@ -15,6 +15,8 @@
 #include "core/time.h"
 #include <algorithm>
 #include "core/threadpool.h"
+#include "core/database.h"
+
 extern "C" {
     #include <argon2.h>
 }
@@ -65,6 +67,11 @@ bool server::init() {
         return false;
     }
 
+    //initialize the database
+    database serverdatabase;
+    int serverinit = serverdatabase.init();
+    if (!serverinit) return false;
+    
     head.next = &tail;
     tail.prev = &head;
 
@@ -585,13 +592,14 @@ void server::flushwb(connection * c) {
         }
     }
     
+    //casting valid as bytessent >= 0 if !=-1
     if (static_cast<size_t>(bytessent) < tosend) {
         c->wbsentindex += bytessent;
         memmove(c->writebuffer,c->writebuffer + c->wbsentindex,c->wbwriteindex - c->wbsentindex);
         setepollout(c,true);
 
     }
-    else if (bytessent == tosend) {
+    else if (static_cast<size_t>(bytessent) == tosend) {
         c->wbsentindex = 0;
         c->wbwriteindex = 0;
         setepollout(c,false);

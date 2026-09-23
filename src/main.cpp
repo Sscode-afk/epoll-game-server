@@ -6,8 +6,7 @@ int main() {
     server a;
     bool initialized = a.init();
     if (!initialized) return 1;
-
+    
     a.run();
-
     return 0;
 }

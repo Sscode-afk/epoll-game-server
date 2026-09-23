@@ -8,7 +8,6 @@
 #define LOGWARNINGNUM(errnum,...) do { if(loglevel::WARNING >= lglvl) { log_write(loglevel::WARNING,(errnum),__FILE__,__LINE__,__VA_ARGS__); } } while(0)
 #define LOGINFO(...) do { if(loglevel::INFO >= lglvl) { log_write(loglevel::INFO,__FILE__,__LINE__,__VA_ARGS__); } } while(0) 
 #define LOGDEBUG(...) do { if(loglevel::DEBUG >= lglvl) { log_write(loglevel::DEBUG,__FILE__,__LINE__,__VA_ARGS__); } } while(0)
-
 #define SERVERASSERT(cond) do { if(!(cond)) { LOGERROR("Invariant failed: %s",#cond); std::abort();}} while(0)
 
 enum class loglevel {DEBUG = 0, INFO = 1, WARNING = 2, ERROR = 3};

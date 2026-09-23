@@ -63,10 +63,6 @@ namespace essential {
         char buf[serverfields::hashresultbufsize];
     };
 
-    struct DBresultentry {
-        uint64_t id;
-    };
-
     template <typename T>
     struct threadsafequeue {
         private:

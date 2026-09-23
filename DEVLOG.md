@@ -207,3 +207,61 @@ for T, P99 is the most sensible since it talks about how much time 99 percent of
 with ~180 hash jobs, the queue is barely fully processed for the last waiting client connection job.
 so the actual cap must be comfortably smaller. I am settling for 100.
 at 100, the hashes are completed in (100 x (T/N) time) which is around 2.76 seconds, well under 5 second deadline for the last job.
+
+## 4-5/09/26
+
+Implemented the threadpool as a test again, which finalized the queue structure. earlier, the queue had its own mutex while the threadpool had one as well along with the condition variable.
+I replaced this with a better pattern that made the threadpool structure much simpler. 
+the queue owns the condition variable and a mutex. a push notifies a thread to wakeup.
+two pop methods inside the single template queue struct. popblock() is for the hashpool where it blocks on a condition variable if the queue is empty or if the kill signal is not true.
+
+the other one is for the receive queue, popping from which is a normal try and pop, since the main loop periodically pops from it. 
+After finally implementing this, I also got to change the structure of parse because till now it did not return relevant information that the handlers needed to read their message (parse was only returning the message type). now it returns a struct. 
+A basic signup handler has been implemented that checks for non terminated pass,user,email buffers and will then pass on to the DB thread which I am moving on building towards next.
+
+Interestingly, I found something about templates. sendmessage is a template method. and its implementation was in server.cpp. since handlers.cpp is another file that can call sendmessage(), it gave me a linker error. 
+turns out I had to move the definition of sendmessage inside server.h itself below the class for anyone including server.h (handlers.cpp) to be able to find the code.
+via server.h, handlers.cpp's function call was able to see the template definition so the compiler did not provide an error, but the linker could not find the implementation for template instantiation since it was sitting in server.cpp.
+
+moving towards implementing sql and the DB thread, and shortly after sessions as well finally.
+
+## 11/09/26
+
+Delved into basic sqlite3 and its configurations. right now the workflow itself is a bit unorganized in terms of what to implement next. The plan is to add a database struct that will hold the DB thread as well as the methods to execute the prepared statements.
+
+to determine how sqlite behaves, we need to set up its pragmas during init. These are set normally like executing a query. one of them is journal_mode = WAL.
+so I read up on it and WAL (write ahead logging) is quite interesting. 
+my dumbed down understanding of this is that writing to the disk server.db file on every write job by the db thread is expensive and it also blocks any other reading thread while the main file is being written on. 
+WAL basically takes whatever is to be written and appends it to a separate file called server.db-wal and not the main file. when the number of entries inside this new file get large enough, checkpointing occurs where the contents are finally flushed to the main database file. 
+
+WAL allows for writers to not block readers. The exact jargon is not clear to me, but the idea is that the WAL file contains the most updated truth about a row in the main file. the gap between the WAL file and the main file is filed by server.db-shm which contains indexes that we can use to reach the updated row in the WAL file if it exists (because if so, this is the content that we want). if it does not exist, we read from the server.db file.
+if at t=0, a reader wants to read row 6 which gets mapped to unit 80 in the WAL file, they are set to only read from unit 80 even though while doing so another writer writes the most updated info about row 6 in unit > 80. these are only ever appended and the shm index ensures that readers post updation are guided to the units at the end. this way readers can read and writers can read. while a writer is writing, the shm updation does not happen so someone cannot read midwrite. 
+
+...and after all of what I just wrote, in my case, there is only a single thread that does both reading and writing and NEVER together. but WAL also buys fewer fsync calls. fsync forces the operating system to basically take the server.db file in the page cache and then flush it to the one on disk so that the changes are permanent. so this is slow.
+in WAL, fsync is only called during checkpointing. all the frames are written to the server.db cache and then finally a single LONG fsync call pushes them to the disk. this is the more significant reason for using WAL.
+
+--
+
+Realised I cannot use the threadsafequeue structure for the dbthread read & write queues considering the fact that each one contains its own mutex and condition variable. this means that the db thread sleeps on two separate conditions. thus a read can block writes that are present in the writequeue. It's better to just create a separate struct that will contain both queues and a single condition variable. 
+
+## 12/09/26
+
+The next problem after having a separate queue for the db thread, is that this queue can only hold a single type of item, which will be the readentry struct for the readqueue and the writeentry struct for the write queue. 
+but considering the readentry, it needs to hold the connid, the readjobtype enum and then the parameters that will be needed to replace the '?' placeholders in the job specific prepared statement. 
+so a single struct now needs to hold variable combinations of parameters.
+Thought on this a bit and reached the conclusion that this can be done if I follow what I was doing on the wire. basically, I can create a byte buffer that has the size equal to the maximum parameter combination size (currently, no statement uses more than one parameter buf if in the future it does). 
+then the dbthread upon receiving the job can simply switch on the jobtype enum and then get to know how to interpret the byte buffer and mempcy bytes into known parameter structs (like usercacheparams or verificationparams).
+but of course this would need me to maintain the max size variable, which I can eliminate by calculating max of the param structs at compile time. for safety, I can also check if a newly added params combination struct in its handler has size greater than max size if it was not used in the calculation by mistake.
+
+--
+
+Above works, but there's something cool I found on the internet, a union. Had never used it but it is similar to above but avoids memcpy. turns out I can store the params struct directly inside a union field in the readjob. the union will automatically have space for the maximum sized params struct so no calculation needed. 
+the main thread when creating the entry will have to set the jobtype and then the contents of the union as well.
+and then inside the db thread switch, it can directly access the union struct based on the enum without memcpy.
+the only thing is that the entry creater (main thread) and the db thread handler have to constantly agree on what to put and read based on the enum. NOTHING prevents me from accessing the wrong params struct from a union that is not filled with it.
+
+--
+
+which brings me to std::variant. always heard of it, never used it. turns out it's best suited for my use case. It does all of the things that union does above, but it allows me to use std::get_if<T>(variant) (this version does not throw an exception) to simply check if the type I am asking for is the one the job's variant field holds.
+I was avoiding std::visit because looking into it brought forward a template pattern that seemed very complex. even though I worked it out, I think I am going to implement my own functor with all the operator overloads per param struct to pass to visit. 
+std::visit ensures that no type inside the variant is left unhandled in the functor.
