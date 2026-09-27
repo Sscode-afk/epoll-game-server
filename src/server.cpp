@@ -22,7 +22,7 @@ extern "C" {
 }
 
 //POLICY: MEMORY ALLOCATION FAILURES ARE LEFT UNHANDLED
-server::server() {
+server::server() : serverdatabase(hthreadpool) {
     epollfd = -1;
     listenerfd = -1;
     clientsid = 1;
@@ -68,15 +68,16 @@ bool server::init() {
     }
 
     //initialize the database
-    database serverdatabase;
     int serverinit = serverdatabase.init();
     if (!serverinit) return false;
-    
+
     head.next = &tail;
     tail.prev = &head;
 
     size_t hashencodedbufferlen = argon2_encodedlen(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,serverfields::saltlen,serverfields::hashlen,Argon2_id);
-    SERVERASSERT(hashencodedbufferlen < serverfields::hashresultbufsize);
+    SERVERASSERT(hashencodedbufferlen <= serverfields::hashresultbufsize);
+    //encoded len includes the null terminator, hashing will not use the fill() method of the fixed charbuf
+    //so above condition is sufficient.
 
     int threadsinit = hthreadpool.init(serverfields::hashpoolthreadcount,hashresultqueue,hashencodedbufferlen);
     SERVERASSERT(threadsinit);

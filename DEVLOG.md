@@ -265,3 +265,29 @@ the only thing is that the entry creater (main thread) and the db thread handler
 which brings me to std::variant. always heard of it, never used it. turns out it's best suited for my use case. It does all of the things that union does above, but it allows me to use std::get_if<T>(variant) (this version does not throw an exception) to simply check if the type I am asking for is the one the job's variant field holds.
 I was avoiding std::visit because looking into it brought forward a template pattern that seemed very complex. even though I worked it out, I think I am going to implement my own functor with all the operator overloads per param struct to pass to visit. 
 std::visit ensures that no type inside the variant is left unhandled in the functor.
+
+# 24/09/26
+Been working on this for a while now, but the cross communication between main thread, db thread, and the hashpool is genuinely hard and has made me pause for a while and take it slow.
+For the login path, I had decided I would chain operations in the sense that the main thread would create a db lookup for the username, and then instead of the main thread awaiting the result and then creating the hashjob, the db thread on successfull lookup would create the hashjob and pass the retrieved account id to the hashjob entry. 
+Once the hash is complete, the result of the hash will contain the account id that the main thread can use to create a session if the connection object still exists.
+
+so this meant that the database was not interacting with the hashpool. for sign-up though, the problem is different. it makes intuitive sense to hash first from the main thread because the db write to enter a new user requires the hash string. 
+but in trying to chain the hash job so that it could create the db write job directly, I simply stopped. Because doing that meant that the hashpool now had to have a reference to the database to submit a job. which also meant the hashjob would now have to carry information that would be required by the write statement.
+
+I realised that atleast for the sign-up path, this was actually making things complex where otherwise the hashpool just took what it needed for the hash. It makes no sense for it to carry email and username fields.
+
+sign-up will hash first. and then use the result to make the main thread issue a write job. the critical details need to survive while the hashjob is being executed. this can be done by making the connection object hold buffers to what is user provided on signup (username, password, email). the connection object is getting quite fat, will probably make it much smaller for unauth objects and only give the full thing on authorization...
+
+Another thing was about the early failure case of login where the username is not found. hashing on success and not on failure creates a time mismatch. so the standard fix is to hash regardless but in the failure case, use a fixed hash that is bound to fail.
+But I am not doing that. usernames are public by default. so signup path can have a lookup before the write job to check if the username already exists (the latency is nothing compared to the hashing that would take place for a new user) and returns a message if it does. so an attacker DOES know which usernames are valid via signup. but I am relying on my hash queue caps and the rate limits. So, since enumeration is not a problem, hashing against a decoy on login lookup failure just costs me resources via the hash, it will not be done and just a generic incorrect credentials message will be returned quick.
+
+# 25/09/26
+
+DB result queue now has a separate mutex.
+Processing all read and write jobs while holding the wait/read queue mutex was wrong. so this was fixed by acquiring the mutex, swapping all the read and write jobs into a local read and write queue declared at the top of work() before the loop. the lock is then released and these local jobs are processed by popping until empty.
+This also naturally led to having a local result vector. the idea is that this allows me to put the results returned by std::visit in the read and write processing loops into the local vector.
+then iterate that to push the results into the main result queue.
+I wrote it wrong the first way around by processing all read jobs first and putting the results in the local vector. then processing the write jobs and putting it again inside there and then finally flushing. but that would add alot of latency for readers that expect fast response.
+so we process reads, flush the local results to main result queue. then process writes, and do the same.
+Because resultqueue is an std::queue, thus the local result vector method does add N extra copies (pushing into the result vector, and then pushing into the main queue). it also adds heap allocation (BUT, since job counts are implicitly bounded by connection counts and rate limits, reserve hits a ceiling and essentially becomes free in further iterations). The theoretical win is that it avoids opening the resultqueue mutex N times for every result push. but contention is genuinely small because only the db thread and the main thread touch that mutex. I am still keeping the vector design, because the copies are virtually free given the size of the dbresult structs and that they are entirely trivially copyable. 
+It actually does help in the cases where contention happens.

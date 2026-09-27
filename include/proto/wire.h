@@ -18,5 +18,15 @@ namespace messages {
     struct __attribute__((packed)) signupresponse {
         uint8_t type = 5;
         uint8_t result = 0;
+        signupresponse(network::servresponse response) {
+            result = static_cast<uint8_t>(response);
+        }
+    };
+    struct __attribute__((packed)) loginresponse {
+        uint8_t type = 6;
+        uint8_t result;
+        loginresponse(network::servresponse response) {
+            result = static_cast<uint8_t>(response);
+        }
     };
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include "server/serversettings.h"
 #include "proto/settings.h"
+#include "proto/objects.h"
 #include <algorithm>
 #include <queue>
 #include <mutex>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <cstring>
 #include <condition_variable>
+#include <variant>
 
 namespace essential {
     struct tokenbucket {
@@ -36,31 +38,27 @@ namespace essential {
 
     struct hashentry {
         uint64_t connid;
+        uint64_t accountid = 0;
         hashpooljobtype jtype;
 
-        char pwdbuf[network::maxcredentialsize + 1];
-        char hashbuf[serverfields::hashresultbufsize];
-
-        size_t pwdlen;
-
-        hashentry(char * password,size_t passlen,int& success,hashpooljobtype type,uint64_t id) {
-            if (passlen > network::maxcredentialsize) {
-                success = -1;
-            }
-            else {
-                memcpy(pwdbuf,password,passlen);
-                pwdbuf[passlen] = '\0';
-                jtype = type;
-                connid = id;
-                pwdlen = strlen(password);
-            }
-        }
+        fixedcharbuffer<network::maxcredentialsize + 1> password;
+        fixedcharbuffer<serverfields::hashresultbufsize> hash;
     };
     
+    struct hashverifyparams {
+        hashresultstatus result;
+    };
+
+    struct hashcreationparams {
+        hashresultstatus result;
+        fixedcharbuffer<serverfields::hashresultbufsize> hash;
+    };
+
     struct hashresultentry {
         uint64_t id;
-        hashresultstatus result;
-        char buf[serverfields::hashresultbufsize];
+        uint64_t accountid = 0;
+        hashpooljobtype jtype;
+        std::variant<hashverifyparams,hashcreationparams> params;
     };
 
     template <typename T>

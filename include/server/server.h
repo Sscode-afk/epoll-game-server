@@ -6,6 +6,8 @@
 #include "server/corestructures.h"
 #include <queue>
 #include "core/threadpool.h"
+#include "core/database.h"
+
 class server {
     private:
         int epollfd;
@@ -50,8 +52,10 @@ class server {
         hashpool hthreadpool;
         essential::threadsafequeue<essential::hashresultentry> hashresultqueue;
 
+        database serverdatabase;
         void handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtype);
-    public:   
+        void handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype);
+    public: 
         server();
         ~server();
 

@@ -3,6 +3,8 @@
 #include <netdb.h>
 #include <vector>
 #include "server/serversettings.h"
+#include "proto/objects.h"
+#include "proto/settings.h"
 struct connection {
     connection() {
         connfd = -1;
@@ -37,4 +39,7 @@ struct connection {
 
     connection * next = nullptr;
     connection * prev = nullptr;
+
+    fixedcharbuffer<network::maxcredentialsize+1> usernamebuf;
+    fixedcharbuffer<network::maxcredentialsize+1> passwordbuf;
 };

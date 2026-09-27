@@ -4,6 +4,7 @@
 #include <vector>
 #include <optional>
 #include <sys/random.h>
+#include "core/log.h"
 extern "C" {
     #include <argon2.h>
 }
@@ -20,8 +21,7 @@ void hashpool::submit(essential::hashentry&& job) {
 }
 
 void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resqueue) {
-    std::vector<char> encodedbuffer;
-    encodedbuffer.resize(encodedlen);
+    char encodedbuf[serverfields::hashresultbufsize];
 
     while (true) {
         std::optional<essential::hashentry> result = jobqueue.popblock();
@@ -37,49 +37,64 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
         hres.id = job.connid;
 
         if (job.jtype == essential::hashpooljobtype::HASH) {
+            //Non verification path does not set account id!
+            SERVERASSERT(job.accountid == 0);
+            hres.jtype = essential::hashpooljobtype::HASH;
+            essential::hashcreationparams params;
+
             bool randfailed = false;
+            ssize_t randres;
             while (true) {
-                int randres = getrandom(saltbuf,serverfields::saltlen,0);
+                randres = getrandom(saltbuf,serverfields::saltlen,0);
                 if (randres == -1) {
                     int errnum = errno;
                     if (errnum == EINTR) {
                         continue;
                     }
                     else {
+                        LOGERRORNUM(errnum,"getrandom failed!");
                         randfailed = true;
                         break;                    
                     }
                 }
+
+                break;
             }
 
-            if (randfailed) {
-                hres.result = essential::hashresultstatus::RANDFAILED;
-                resqueue.push(std::move(hres));
-                continue;
-            }
+            SERVERASSERT(!randfailed && randres == serverfields::saltlen);
 
-            int encoderes = argon2id_hash_encoded(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,job.pwdbuf,job.pwdlen,saltbuf,serverfields::saltlen,serverfields::hashlen,encodedbuffer.data(),encodedbuffer.size());
+            int encoderes = argon2id_hash_encoded(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,job.password.buf,job.password.length,saltbuf,serverfields::saltlen,serverfields::hashlen,encodedbuf,sizeof encodedbuf);
+            
             if (encoderes == ARGON2_OK) {
-                hres.result = essential::hashresultstatus::ENCODEDONE;
-                memcpy(hres.buf,encodedbuffer.data(),encodedbuffer.size());
-                resqueue.push(std::move(hres));
-
-                encodedbuffer.clear();
+                //fill wants the actual content.
+                SERVERASSERT(params.hash.fill(encodedbuf,static_cast<uint32_t>(strlen(encodedbuf))));
+                params.result = essential::hashresultstatus::ENCODEDONE;
             }
             else {
-                hres.result = essential::hashresultstatus::ENCODEFAILED;
-                resqueue.push(std::move(hres));
+                params.result = essential::hashresultstatus::ENCODEFAILED;
             }
+
+            explicit_bzero(job.password.buf,job.password.length);
+            hres.params.emplace<essential::hashcreationparams>(params);
+            resqueue.push(std::move(hres));
         }
 
         else {
-            int rs = argon2_verify(job.hashbuf,job.pwdbuf,job.pwdlen,Argon2_id);
+            SERVERASSERT(job.accountid != 0);
+            hres.jtype = essential::hashpooljobtype::VERIFY;
+            essential::hashverifyparams params;
+        
+            int rs = argon2_verify(job.hash.buf,job.password.buf,job.password.length,Argon2_id);
             if (rs == ARGON2_OK) {
-                hres.result = essential::hashresultstatus::VERIFYDONE;
+                params.result = essential::hashresultstatus::VERIFYDONE;
+                hres.accountid = job.accountid;
             }
             else {
-                hres.result = essential::hashresultstatus::VERIFYFAIL;
+                params.result = essential::hashresultstatus::VERIFYFAIL;
             }
+
+            explicit_bzero(job.password.buf,job.password.length);
+            hres.params.emplace<essential::hashverifyparams>(params);
             resqueue.push(std::move(hres));
         }
     }
