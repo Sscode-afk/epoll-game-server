@@ -835,6 +835,8 @@ void server::checkresults() {
             }
 
         }
+
+        hashresults.pop();
     }
 
 }
