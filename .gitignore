@@ -19,3 +19,7 @@ compile_commands.json
 .DS_Store
 
 testconcepts/
+
+database/*.db
+database/*.db-shm
+database/*.db-wal

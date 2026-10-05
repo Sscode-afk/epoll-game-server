@@ -9,7 +9,7 @@
 #include "proto/objects.h"
 
 void database::dbinterr(int errcode, const char * stage) {
-    LOGERROR("Sqlite error on %s : %s",stage,sqlite3_errstr(errcode));
+    LOGERROR("DATABASE: Sqlite error on %s : %s",stage,sqlite3_errstr(errcode));
 }
 
 bool database::executequery(const char * query,const char * stage) {
@@ -37,23 +37,22 @@ struct readfunctor {
     //the overloads accept a type to distinguish cases where different job types use the same params
     dbresultentry operator()(readverifyparams& params,dbjobtype type,uint64_t connid) {
         SERVERASSERT(type == dbjobtype::READLOGINVERIFY);
-        sqlite3_bind_text(db.stmtget_loginverification,1,params.username.buf,static_cast<int>(params.username.length),SQLITE_STATIC);
+        sqlite3_bind_text(db.getloginverify.s,db.getloginverify.bindusernameindex,params.username.buf,static_cast<int>(params.username.length),SQLITE_STATIC);
         
         dbresultentry res;
-        resultverifyparams resparam;
-    
-        int status = sqlite3_step(db.stmtget_loginverification);
+
+        int status = sqlite3_step(db.getloginverify.s);
 
         //found a matching row
         if (status == SQLITE_ROW) {
-            resparam.success = true;
+            res.status = dbresultstatus::SUCCESS;
 
-            uint64_t accid = static_cast<uint64_t>(sqlite3_column_int64(db.stmtget_loginverification,VERIFYACCOUNTIDCOLUMN));
-            int hashbytecount = sqlite3_column_bytes(db.stmtget_loginverification,VERIFYHASHCOLUMN);
+            uint64_t accid = static_cast<uint64_t>(sqlite3_column_int64(db.getloginverify.s,db.getloginverify.accidcolumnindex));
+            int hashbytecount = sqlite3_column_bytes(db.getloginverify.s,db.getloginverify.hashcolumnindex);
 
             fixedcharbuffer<serverfields::hashresultbufsize> hashbuf;
             SERVERASSERT(static_cast<size_t>(hashbytecount) == hashpoolref.encodedlen - 1);
-            hashbuf.fill(reinterpret_cast<const char *>(sqlite3_column_text(db.stmtget_loginverification,VERIFYHASHCOLUMN)),static_cast<size_t>(hashbytecount));
+            hashbuf.fill(reinterpret_cast<const char *>(sqlite3_column_text(db.getloginverify.s,db.getloginverify.hashcolumnindex)),static_cast<size_t>(hashbytecount));
 
             essential::hashentry hashjob{ .connid = connid, .accountid = accid, .jtype = essential::hashpooljobtype::VERIFY, .password = params.password, .hash = hashbuf};
             hashpoolref.submit(std::move(hashjob));
@@ -61,15 +60,39 @@ struct readfunctor {
             explicit_bzero(params.password.buf,params.password.length); //clear the password
         }
 
-        else resparam.success = false;
+        else if (status == SQLITE_DONE) res.status = dbresultstatus::READNOTFOUND;
+
+        else {
+            res.status = dbresultstatus::FAILEDFATAL;
+            db.killdb();
+            db.dbinterr(status,"DBREAD : loginverification");
+        }
+
+        sqlite3_reset(db.getloginverify.s);
+        sqlite3_clear_bindings(db.getloginverify.s);
 
         res.connid = connid;
         res.resultjob = type;
-        res.params.emplace<1>(resparam);
         return res;
     }
     dbresultentry operator()(readusercacheparams& params,dbjobtype type,uint64_t connid) {
+        
+    }
+    dbresultentry operator()(readcheckuserparams& params,dbjobtype type,uint64_t connid) {
+        SERVERASSERT(type == dbjobtype::READCHECKIFUSEREXISTS);
+        sqlite3_bind_text(db.checkuser.s,db.checkuser.bindusernameindex,params.username.buf,static_cast<int>(params.username.length),SQLITE_STATIC);
+        int rs = sqlite3_step(db.checkuser.s);
 
+        dbresultentry res;
+
+        if (rs == SQLITE_ROW) {
+            res.status = dbresultstatus::SUCCESS;
+        }
+        else res.status = dbresultstatus::READNOTFOUND;
+
+        res.connid = connid;
+        res.resultjob = type;
+        return res;
     }
 };
 
@@ -80,10 +103,49 @@ struct writefunctor {
 
         res.connid = connid;
         res.resultjob = type;
+        return res;
+    }
+    dbresultentry operator()(writenewuserparams& params,dbjobtype type,uint64_t connid) {
+        SERVERASSERT(type == dbjobtype::WRITENEWUSER);
+
+        sqlite3_bind_text(db.putnewuser.s,db.putnewuser.bindusernameindex,params.username.buf,static_cast<int>(params.username.length),SQLITE_STATIC);
+        sqlite3_bind_text(db.putnewuser.s,db.putnewuser.bindhashindex,params.hash.buf,static_cast<int>(params.hash.length),SQLITE_STATIC);
+        sqlite3_bind_text(db.putnewuser.s,db.putnewuser.bindemailindex,params.email.buf,static_cast<int>(params.email.length),SQLITE_STATIC);
+
+        dbresultentry res;
+
+        int rs = sqlite3_step(db.putnewuser.s);
+        sqlite3_reset(db.putnewuser.s);
+        sqlite3_clear_bindings(db.putnewuser.s);
+
+        if (rs == SQLITE_DONE) {
+            res.status = dbresultstatus::SUCCESS;
+        }
+        else if (rs == SQLITE_CONSTRAINT_UNIQUE) {
+            //somebody with same chosen username hashed first
+            res.status = dbresultstatus::WRITEFAILEDUNIQUE;
+        }
+        else {
+            res.status = dbresultstatus::FAILEDFATAL;
+            db.killdb();  
+            db.dbinterr(rs,"DBWRITE : newuser");
+        }
+
+        res.connid = connid;
+        res.resultjob = type;
 
         return res;
     }
 };
+
+void database::sendshutdownsignal() {
+    dbresultentry shutdownres;
+    shutdownres.connid = 0;
+    shutdownres.status = dbresultstatus::FAILEDFATAL;
+
+    std::lock_guard<std::mutex> lck(resultmtx);
+    resultqueue.push(std::move(shutdownres));
+}
 
 void database::work() {
     std::queue<dbreadentry> localreads;
@@ -104,11 +166,16 @@ void database::work() {
         size_t totalreads = localreads.size(); //pop brings reads down to 0, storing it.
         while (!localreads.empty()) {
             dbreadentry& r = localreads.front();
-            localresults.emplace_back( 
-                std::visit(
-                    [&](auto& params) -> dbresultentry { return readvisitor(params,r.entrytype,r.connid); }, r.params
-                )
+            dbresultentry res = std::visit(
+                [&](auto& params) -> dbresultentry { return readvisitor(params,r.entrytype,r.connid); }, r.params
             );
+
+            if (stopdatabase) {
+                sendshutdownsignal();
+                return;
+            }
+
+            localresults.push_back(std::move(res));
             localreads.pop();
         }
 
@@ -119,14 +186,43 @@ void database::work() {
             }
         }
 
-        while (!localwrites.empty()) {
-            dbwriteentry& w = localwrites.front();
-            localresults.emplace_back(
-                std::visit(
+        if (!localwrites.empty()) {
+            //open a SQLITE write transaction
+            int transaction = sqlite3_exec(db,"BEGIN IMMEDIATE;",nullptr,nullptr,nullptr);
+            if (transaction != SQLITE_OK) {
+                dbinterr(transaction,"WORKER : begintransaction");
+                sendshutdownsignal();
+                return;
+            }
+
+            while (!localwrites.empty()) {
+                dbwriteentry& w = localwrites.front();
+                dbresultentry res = std::visit (
                     [&](auto& params) -> dbresultentry { return writevisitor(params,w.entrytype,w.connid); }, w.params
-                )  
-            );
-            localwrites.pop();
+                );
+
+                if (stopdatabase) {
+                    //rollback and pack the shutdown message
+                    sqlite3_exec(db,"ROLLBACK;",nullptr,nullptr,nullptr);
+                    sendshutdownsignal();
+                    return;
+                }
+
+                localresults.push_back(std::move(res));
+                localwrites.pop();
+            }
+
+            SERVERASSERT(stopdatabase == false);
+            int rs = sqlite3_exec(db,"COMMIT;",nullptr,nullptr,nullptr);
+            if (rs != SQLITE_OK) {
+                //commit failures shut down the server
+                //if in autocommit mode, then do not explicitly ROLLBACK
+                if (!sqlite3_get_autocommit(db)) sqlite3_exec(db,"ROLLBACK;",nullptr,nullptr,nullptr);
+                dbinterr(rs,"WORKER : writebatchcommit");
+
+                sendshutdownsignal();
+                return;
+            }
         }
 
         {
@@ -140,10 +236,18 @@ void database::work() {
     }
 }
 
+int getcolindex(sqlite3_stmt * s, const char * columnname) {
+    int n = sqlite3_column_count(s);
+    for (int i = 0; i < n; i++) {
+        if (std::string_view(sqlite3_column_name(s,i)) == columnname) return i;
+    }
+    return -1;
+}
+
 bool database::init() {
     std::filesystem::path dbpath = "database/server.db";
     if (!std::filesystem::is_directory(dbpath.parent_path())) {
-        LOGERROR("Database directory (%s) does not exist!",std::filesystem::absolute(dbpath.parent_path()).c_str());
+        LOGERROR("DATABASE: Database directory (%s) does not exist!",std::filesystem::absolute(dbpath.parent_path()).c_str());
         return false;
     }
 
@@ -151,6 +255,11 @@ bool database::init() {
 
     if (status != SQLITE_OK) {
         dbinterr(status,"INIT : open");
+        return false;
+    }
+
+    if ((status = sqlite3_extended_result_codes(db,1))!=SQLITE_OK) {
+        dbinterr(status,"INIT : setextendedcodes");
         return false;
     }
 
@@ -164,30 +273,41 @@ bool database::init() {
         " account_id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " username TEXT UNIQUE NOT NULL,"
         " phash TEXT NOT NULL,"
-        " emblems INTEGER NOT NULL"
+        " email TEXT NOT NULL,"
+        " emblems INTEGER NOT NULL DEFAULT 0"
         ");";
     
     if ((status = executequery(schema,"INIT : usersschema")) == false) return false;
 
     //preparing the queries
-    const char * queryloginverification = "SELECT account_id,username,phash FROM users WHERE username = ?1;";
-    if ((status = preparestatement(db,&stmtget_loginverification,queryloginverification,"INIT : preploginverify")) == false) return false;
+    const char * queryloginverification = "SELECT account_id,username,phash FROM users WHERE username = :username;";
+    if ((status = preparestatement(db,&getloginverify.s,queryloginverification,"INIT : preploginverify")) == false) return false;
     
     const char * querygetuserinfo = "SELECT * FROM users WHERE account_id = ?1;";
-    if ((status = preparestatement(db,&stmtget_usercachedata,querygetuserinfo,"INFO : prepgetcache")) == false) return false;
+    if ((status = preparestatement(db,&stmtget_usercachedata,querygetuserinfo,"INIT : prepgetcache")) == false) return false;
 
-    const char * insertnewuser = "INSERT INTO users (username,phash) VALUES (?1,?2);";
-    if ((status = preparestatement(db,&stmtput_newuser,insertnewuser,"INIT : prepsignupinsert")) == false) return false;
+    const char * insertnewuser = "INSERT INTO users (username,phash,email) VALUES (:username,:phash,:email);";
+    if ((status = preparestatement(db,&putnewuser.s,insertnewuser,"INIT : prepsignupinsert")) == false) return false;
 
-    //checks if the columns and the associated indexes match
-    SERVERASSERT(std::string_view(sqlite3_column_name(stmtget_loginverification,VERIFYACCOUNTIDCOLUMN)) == "account_id");
-    SERVERASSERT(std::string_view(sqlite3_column_name(stmtget_loginverification,VERIFYHASHCOLUMN)) == "phash");
+    const char * checkuserquery = "SELECT 1 FROM users WHERE username = :username LIMIT 1;";
+    if ((status = preparestatement(db,&checkuser.s,checkuserquery,"INIT : prepcheckuserexistence")) == false) return false;
+    
+    //setting bind parameter indices
+    SERVERASSERT((getloginverify.bindusernameindex = sqlite3_bind_parameter_index(getloginverify.s,":username")) != 0);
+    SERVERASSERT((putnewuser.bindusernameindex = sqlite3_bind_parameter_index(putnewuser.s,":username")) != 0);
+    SERVERASSERT((putnewuser.bindhashindex = sqlite3_bind_parameter_index(putnewuser.s,":phash")) != 0);
+    SERVERASSERT((putnewuser.bindemailindex = sqlite3_bind_parameter_index(putnewuser.s,":email")) != 0);
+    SERVERASSERT((checkuser.bindusernameindex = sqlite3_bind_parameter_index(checkuser.s,":username")) != 0);
+
+    //setting up column indices
+    SERVERASSERT((getloginverify.accidcolumnindex = getcolindex(getloginverify.s,"account_id")) != -1);
+    SERVERASSERT((getloginverify.hashcolumnindex = getcolindex(getloginverify.s,"phash")) != -1);
 
     if (dbthread.joinable()) {
         dbthread = std::thread(&database::work,this);
     }
 
-    LOGINFO("Database init successful!");
+    LOGINFO("DATABASE: Database init successful!");
     return true;
 }
 
@@ -205,6 +325,35 @@ void database::submitloginauthjob(uint64_t connid,fixedcharbuffer<network::maxcr
     readqueue.push(std::move(readjob));
 }
 
+void database::submitsignupjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email, fixedcharbuffer<serverfields::hashresultbufsize>& hash) {
+    dbwriteentry writejob;
+    writejob.connid = connid;
+    writejob.entrytype = dbjobtype::WRITENEWUSER;
+
+    writenewuserparams params;
+    params.email = email;
+    params.username = username;
+    params.hash = hash;
+
+    writejob.params.emplace<writenewuserparams>(params);
+    
+    std::lock_guard<std::mutex> lck(mtx);
+    writequeue.push(std::move(writejob));
+}
+
+void database::submituserexistencejob(uint64_t connid, fixedcharbuffer<network::maxcredentialsize +1>& username) {
+    dbreadentry readjob;
+    readjob.connid = connid;
+    readjob.entrytype = dbjobtype::READCHECKIFUSEREXISTS;
+
+    readcheckuserparams params;
+    params.username = username;
+    readjob.params.emplace<readcheckuserparams>(params);
+
+    std::lock_guard<std::mutex> lck(mtx);
+    readqueue.push(std::move(readjob));
+}
+
 database::database(hashpool& ref) : hp(ref) {}
 
 database::~database() {
@@ -214,4 +363,13 @@ database::~database() {
     }
     cv.notify_all();
     if (dbthread.joinable()) dbthread.join();
+}
+
+void database::killdb() {
+    stopdatabase = true;
+}
+
+void database::getresults(std::queue<dbresultentry>& localqueue) {
+    std::lock_guard<std::mutex> lck(resultmtx);
+    localqueue.swap(resultqueue);
 }

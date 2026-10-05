@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <cstring>
 #include <unistd.h>
+#include <mutex>
+
+static std::mutex logmtx;
 
 void setloglevel(loglevel lvl) {
     lglvl = lvl;
@@ -120,13 +123,21 @@ void vlog_write(loglevel lvl,int errnum,const char * file,int line,const char * 
 void log_write(loglevel lvl,const char * file,int line,const char * fmt,...) {
     va_list args;
     va_start(args,fmt);
-    vlog_write(lvl,-1,file,line,fmt,args);
+
+    {
+        std::lock_guard<std::mutex> lck(logmtx);
+        vlog_write(lvl,-1,file,line,fmt,args);
+    }
+
     va_end(args);
 }
 
 void log_write(loglevel lvl,int errnum,const char * file,int line,const char * fmt,...) {
     va_list args;
     va_start(args,fmt);
-    vlog_write(lvl,errnum,file,line,fmt,args);
+    {
+        std::lock_guard<std::mutex> lck(logmtx);
+        vlog_write(lvl,errnum,file,line,fmt,args);
+    }
     va_end(args);
 }

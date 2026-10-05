@@ -1,10 +1,9 @@
 # epoll-game-server
 
-A single-threaded, event-driven TCP server built on Linux `epoll`, it is to be the network foundation of a small multiplayer game. 
+A single-threaded, event-driven TCP server built on Linux `epoll` with worker threads for hashing and database I/O, it is to be the network foundation of a small multiplayer game. 
 It's written in C++17 with no dependencies beyond the standard library and POSIX.
 
-**Status: in progress.** The connection lifecycle, per-IP admission control, and logging are
-implemented. 
+**Status: in progress.** The connection lifecycle, per-IP admission control, logging, connection state machine, worker loops for hashing and database I/O, reading and writing paths over the wire and the receive-response mechanism has been implemented.
 See [Not implemented yet](#not-implemented-yet) for what remains.
 
 This is entirely a learning project. I am a second-year CS undergraduate and this is my first major project and also the largest piece of systems code I have written. [`DEVLOG.md`](DEVLOG.md) records what I built, what broke, what was understood and what I managed to change my mind about with appropriate dates.
@@ -35,7 +34,7 @@ cmake --build build-asan
 ## Layout
 
 ```
-include/core/     logging, clock, formatting helpers, threadpool
+include/core/     logging, clock, formatting helpers, threadpool, database
 include/proto/    wire format, parser, network settings
 include/server/   connection struct, server class, tunings, socket setup
 src/              implementations
@@ -110,6 +109,32 @@ No heap allocations on any log path. Logging uses a stack buffer and a `appender
 
 `SERVERASSERT` aborts even in release builds, since breaking invariants is fatal to the server. So they are displayed loud and clear when broken.
 
+### Swapping instead of draining
+
+The main thread and the database thread acquire the respective queue locks a single time in one processing loop and swap the elements into a local queue. This avoids having to hold the lock while each element is popped and processed allowing the other thread to access the queue in the meanwhile. 
+
+### Chaining, but only one way
+
+For login, the database read job that fetches the account id and the stored password hash, itself creates the hashjob to verify it. This means it carries a password parameter along with the username (to pass the password to the hashjob). 
+A similar situation arises during signup. Once the provided password is hashed, there is an oppurtunity for chaining by having the hashing thread also push a writejob directly without responding the status of the hash to the server first so that the server creates the writejob. 
+However this is not done because it would need a hashjob entry to carry information like username, email etc. that is entirely not related to a hash. 
+
+This differs from the first case, where the things required for the hashjob are present inside the database itself. Having the read job carry the password is semantically less ambigious.
+It is also because the extra set of fields required for signup can grow with time depending on the service. login just takes a username and a password.
+
+### No decoy hashing on login miss
+
+During login, if the username is not found, the system does not hash against a fix decoy hash. What this aimed to prevent was allowing attackers to analyze the timing difference when the username is found (hundreds of ms) and when it is not found (returned immediately without hashing) to guess which usernames already exist inside the database.
+However, in the current architecture, this is useless and wasted work. There is already a much more reliable path for enumeration -> and that is signup.
+To prevent hashing, the signup path returns username already taken if it does.
+So allowing enumeration on one side and trying to prevent on the other only costs the system.
+Allowing enumeration is cushioned by the queue caps and the rate limits.
+
+### Database error is one or the other
+
+Under the current scope, only a unique constraint failure is tolerated and does not stop the execution of the server. It is handled by responding to the client to prompt them to retry with correct input. 
+Any other constraint or otherwise failure is treated as fatal to the database. Writes are rolled back and a flag is set whose detection in the main thread prompts it to broadcast that the server is closing to all active connections and then stop execution.
+
 ---
 
 ## Wire format
@@ -122,7 +147,6 @@ Fixed size primitives, `__attribute__((packed))` and proper byte order conversio
 
 ## Not implemented yet
 
-- **Authentication.** The setup is ready, not fully done
 - **Heartbeats** for authenticated connections.
 - **Message-level rate limiting.**
 - **Sessions** for reconnection.
@@ -133,7 +157,7 @@ Known-accepted limitations:
 
 - IPv4 only.
 - Memory allocation failures are unhandled (an allocation failure ends the process rather than handling/degrading it)
-- The defence is only at the application level. attacks that exhaust the resources below this layer are outside the scope of the project.
+- The defence is only at the application level. attacks that exhaust the resources below this layer are outside the scope of the project. (no TLS, captcha, email verification etc.)
 
 ---
 

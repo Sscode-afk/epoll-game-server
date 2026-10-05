@@ -5,6 +5,7 @@
 #include "server/serversettings.h"
 #include "proto/objects.h"
 #include "proto/settings.h"
+#include "server/corestructures.h"
 struct connection {
     connection() {
         connfd = -1;
@@ -28,9 +29,7 @@ struct connection {
     size_t rbreadindex;
     size_t rbwriteindex;
 
-    uint8_t writebuffer[serverfields::CLIENTWRITEbufsizemax];
-    size_t wbwriteindex;
-    size_t wbsentindex;
+    essential::circularwritebuffer writebuffer ;
 
     char tag[4 + 20 + INET_ADDRSTRLEN + 2]; //"conn {max uint64t} {maxipv4addr}\0"
 
@@ -42,4 +41,5 @@ struct connection {
 
     fixedcharbuffer<network::maxcredentialsize+1> usernamebuf;
     fixedcharbuffer<network::maxcredentialsize+1> passwordbuf;
+    fixedcharbuffer<network::maxemailsize + 1> emailbuf;
 };

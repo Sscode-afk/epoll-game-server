@@ -9,13 +9,17 @@
 #include <thread>
 #include "core/threadpool.h"
 
-enum class dbjobtype {READLOGINVERIFY,READUSERCACHE,WRITEUSERCACHE};
-enum class dbresultstatus {};
+enum class dbjobtype {READLOGINVERIFY,READUSERCACHE,READCHECKIFUSEREXISTS,WRITEUSERCACHE,WRITENEWUSER};
+enum class dbresultstatus {SUCCESS,READNOTFOUND,WRITEFAILEDUNIQUE,FAILEDFATAL};
 
 //read params
 struct readverifyparams {
     fixedcharbuffer<network::maxcredentialsize + 1> username;
     fixedcharbuffer<network::maxcredentialsize + 1> password;
+};
+
+struct readcheckuserparams {
+    fixedcharbuffer<network::maxcredentialsize + 1> username;
 };
 
 struct readusercacheparams {
@@ -29,38 +33,54 @@ struct writeupdatecacheparams {
     uint64_t emblems;
 };
 
+struct writenewuserparams {
+    fixedcharbuffer<network::maxcredentialsize + 1> username;
+    fixedcharbuffer<network::maxemailsize + 1> email;
+    fixedcharbuffer<serverfields::hashresultbufsize> hash;
+};
+
 //result params
-struct resultonlystatus {
-    bool success;
-};
 struct resultcacheparams {
-    bool success;
-};
-struct resultverifyparams {
-    bool success;
+
 };
 
 //entries
 struct dbreadentry {
     uint64_t connid;
     dbjobtype entrytype;
-    std::variant<readverifyparams,readusercacheparams> params;
+    std::variant<readverifyparams,readusercacheparams,readcheckuserparams> params;
 };
 
 struct dbwriteentry {
     uint64_t connid;
     dbjobtype entrytype;
-    std::variant<writeupdatecacheparams> params;
+    std::variant<writeupdatecacheparams,writenewuserparams> params;
 };
 
 struct dbresultentry {
     uint64_t connid;
     dbjobtype resultjob;
-    std::variant<resultonlystatus,resultverifyparams,resultcacheparams> params;
+    dbresultstatus status;
+    //with monostate, params is default constructible to indicate absence of a type at the moment
+    std::variant<std::monostate,resultcacheparams> params;
 };
 
-constexpr int VERIFYACCOUNTIDCOLUMN = 0;
-constexpr int VERIFYHASHCOLUMN = 2;
+//stmt
+struct adduserstmt {
+    sqlite3_stmt * s = nullptr;
+    int bindusernameindex, bindhashindex, bindemailindex;
+};
+
+struct verifyloginstmt {
+    sqlite3_stmt * s = nullptr;
+    int bindusernameindex;
+    int accidcolumnindex, hashcolumnindex;
+};
+
+struct userexistencestmt {
+    sqlite3_stmt * s = nullptr;
+    int bindusernameindex;
+};
 
 struct database {
     private:
@@ -80,17 +100,24 @@ struct database {
 
         void work();
         std::thread dbthread;
+        bool stopdatabase = false;
+        void sendshutdownsignal();
 
         bool killthread;
     public:
-        sqlite3_stmt* stmtget_loginverification = nullptr;
+        verifyloginstmt getloginverify;
         sqlite3_stmt* stmtget_usercachedata = nullptr;
-        sqlite3_stmt* stmtput_newuser = nullptr;
+        adduserstmt putnewuser;
+        userexistencestmt checkuser;
 
         bool init();
         void dbinterr(int errcode, const char * stage);
         void submitloginauthjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxcredentialsize + 1>& password);
-        bool submitsignupjob(const char * username, const char * password,const char * email);
+        void submitsignupjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email, fixedcharbuffer<serverfields::hashresultbufsize>& hash);
+        void submituserexistencejob(uint64_t connid, fixedcharbuffer<network::maxcredentialsize + 1>& username);
+        
+        void killdb();
+        void getresults(std::queue<dbresultentry>& localqueue);
 
         database(hashpool& ref);
         ~database();

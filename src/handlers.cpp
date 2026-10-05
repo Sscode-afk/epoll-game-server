@@ -6,6 +6,11 @@
 #include <vector>
 
 void server::handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtype) {
+    SERVERASSERT(c->state != serverfields::connstates::NONE && c->state != serverfields::connstates::DEAD);
+    
+    //Ignore signup requests from connections that are not in the unauth state (already mid-signup or duplicates)
+    if (c->state != serverfields::connstates::UNAUTH) return;
+    
     if (static_cast<size_t>(size) != sizeof(messages::signuppacket)) {
         LOGWARNING("Sign-up payload size mismatch for '%s', dropping client!",c->tag);
         markdead(c);
@@ -30,14 +35,22 @@ void server::handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtyp
     }
 
     if (usersize < network::mincredentialsize || passsize < network::mincredentialsize) {
-        messages::signupresponse response(network::servresponse::SIGNUPCREDTOOSHORT);
+        messages::serversignupresponse response(network::servresponse::SIGNUPCREDTOOSHORT);
         sendmessage(c,response);
         return;
-    }  
+    }    
     
+    SERVERASSERT(c->usernamebuf.fill(packet.username,static_cast<uint32_t>(usersize)));
+    SERVERASSERT(c->passwordbuf.fill(packet.password,static_cast<uint32_t>(passsize)));
+    SERVERASSERT(c->emailbuf.fill(packet.email,static_cast<uint32_t>(emailsize)));
+
+    serverdatabase.submituserexistencejob(c->connid,c->usernamebuf);
 }
 
 void server::handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype) {
+    SERVERASSERT(c->state != serverfields::connstates::NONE && c->state != serverfields::connstates::DEAD);
+    if (c->state != serverfields::connstates::UNAUTH) return;
+
     if (static_cast<size_t>(size) != sizeof(messages::authpacket)) {
         LOGWARNING("Sign-up payload size mismatch for '%s', dropping client!",c->tag);
         markdead(c);
@@ -61,7 +74,7 @@ void server::handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype
     }
 
     if (usersize < network::mincredentialsize || passsize < network::mincredentialsize) {
-        messages::loginresponse response(network::servresponse::LOGINCREDTOOSHORT);
+        messages::serverloginresponse response(network::servresponse::LOGINCREDTOOSHORT);
         sendmessage(c,response);
         return;
     } 

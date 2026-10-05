@@ -9,7 +9,9 @@ namespace network {
         SIGNUPSUCCESS = 0,
         SIGNUPCREDTOOSHORT = 1,
         SIGNUPNAMETAKEN = 2,
-        LOGINFAILED = 3,
-        LOGINCREDTOOSHORT = 4
+        SIGNUPFAILED = 3,
+        LOGINFAILED = 4,
+        LOGINCREDTOOSHORT = 5,
+        LOGINSUCCESS = 6
     };
 }

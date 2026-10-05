@@ -15,18 +15,22 @@ namespace messages {
         char email[network::maxemailsize + 1];
     };
 
-    struct __attribute__((packed)) signupresponse {
+    struct __attribute__((packed)) serversignupresponse {
         uint8_t type = 5;
         uint8_t result = 0;
-        signupresponse(network::servresponse response) {
+        serversignupresponse(network::servresponse response) {
             result = static_cast<uint8_t>(response);
         }
     };
-    struct __attribute__((packed)) loginresponse {
+    struct __attribute__((packed)) serverloginresponse {
         uint8_t type = 6;
         uint8_t result;
-        loginresponse(network::servresponse response) {
+        serverloginresponse(network::servresponse response) {
             result = static_cast<uint8_t>(response);
         }
+    };
+
+    struct __attribute__((packed)) servershutdownpacket {
+        uint8_t type = 10;
     };
 }

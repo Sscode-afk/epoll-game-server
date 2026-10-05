@@ -291,3 +291,43 @@ I wrote it wrong the first way around by processing all read jobs first and putt
 so we process reads, flush the local results to main result queue. then process writes, and do the same.
 Because resultqueue is an std::queue, thus the local result vector method does add N extra copies (pushing into the result vector, and then pushing into the main queue). it also adds heap allocation (BUT, since job counts are implicitly bounded by connection counts and rate limits, reserve hits a ceiling and essentially becomes free in further iterations). The theoretical win is that it avoids opening the resultqueue mutex N times for every result push. but contention is genuinely small because only the db thread and the main thread touch that mutex. I am still keeping the vector design, because the copies are virtually free given the size of the dbresult structs and that they are entirely trivially copyable. 
 It actually does help in the cases where contention happens.
+
+# 29/09/26
+
+--
+Earlier, I was using emplace_back() when inserting the result structs returned by the read/write visitors into the local results vector.
+Although it is not used now, but one of the thoughts for the worker loop to detect that a fatal error has occured on some read/write job was to inspect its status field. The first thing I did for that was to store the return value of the visitor into a variable res. Use it for the ispection and then push it into localresults.
+Upon doing this, it struck me that I could just insert the struct as earlier, and then inspect the last element...and this seemed like an 'optimization' to me because I was thinking that it was avoiding an extra copy that was happening because of storing the returned value into a variable first. And that has led me to another learning about something called return value optimisation. Apparently, since I am on c++ 17, the return value of the visitor overloads are directly created in the stack frame of the caller. This means that the store was not an additional copy at all. That is pretty cool.
+
+-- 
+
+# 03/10/26
+
+Haven't pushed to github in a while but I have been working on the code. I did make progress and also found some stuff that needed to be changed.
+
+Both the hash and database worker loop is complete. Since the scope of this project is only to cover the worker operations of login, signup, cache updates...the workflow is quite easy. hashing and database operations have resulted in having many more states that a connection object can have pre-authentication. 
+I made the main thread loop which runs everytime post reap(), by simply swapping the db result queue and hash result queue into local queues. ony by one all db result entries are processed first and then the hash entries. When a result is processed, the system checks if the state of the connection object that issued the job is valid at that moment. This is because to the client, going from UNAUTH -> SIGNUPDBCHECK -> SIGNUPHASH -> SIGNUPDBWRITE -> IDLE is a single operation, and hence the connection having changed states midway can be treated as fatal towards the connection. 
+The order of processing is not a problem, because each job associated with a specific stage is issued by the completion of the stage before. the only exception is login, where the login database job internally creates the hashjob as well (chaining). But given the intervals of draining results by the main thread and the fact that the db worker loop processes all readjobs first and immediately puts them inside the result queue, the LOGINDB job always completes first even if somehow LOGINHASH of the same connection object comes inside the hash result queue of that batch. (because otherwise, the same connection object cannot have the same job result entry in the same batch (the system drops jobs while the connection is midway waiting for its result)).
+
+With the increased number of states (especially since the login and signup states are sub-unauth states), the state changer method was becoming a mess of if-else statements and also leading to the counter arithmetic being split in multiple places.
+So I put a transition matrix, that deponding upon the row and column determines if a transition from oldstate(row) to newstate(col) is valid. then only if a transition is valid, we can divide each transition as between auth/unauth to auth/unuath or !auth/!unauth combinations and thus though the counter arithmetic in minimal checks.
+I had to trace whether it covers each case since its not directly evident, but it does look clean. 
+
+--
+Apart from fixing the inverted return statement condition for setting epollout, I also found a few things.
+Looking back at the flushwb() method, I saw that it is quite inefficient. This is because the method basically does a memmove on every partial write. another thing is that the sentpointer (which increments anytime that amount of bytes are flushed to the socket sendbuffer) gets set to 0 in both situations when the entire message to be sent manages to get flushed into the sendbuffer or on partial send. 
+so, in a way, it is useless. it does NOT track the number of bytes that have been sent till now and rather just gets reset everytime there is a partial write because of the memmove.
+I looked it up a bit to see what is the best solution. standard practice is a ringbuffer, and I was familiar with that circular byte array logic, but somehow it did not strike me earlier that I should have been using that from the beginning. 
+It basically has 0 memmoves and is a much better alternative. 
+
+Above also prompted me to look at the reading logic in handlemessage(). Comparing that code to flushwb(), the severity of the memmove is much less because the writepointer increments in a loop until there is no more space left. this ensures that after the parsing loop is over, either both are reset to 0 (if no packet was partially received) which is O(1) or a single memmove does happen when a partial packet is received. compared to flushing logic where an almost full sendbuffer meant every single packet being sent triggers a memmove.
+But scanning the read logic made me reach an invariant that must be present. 
+Like stated, the writepointer advances until the entire readbuffer is filled with bytes. 
+
+The parser checks if the total frame size (header + contentsize) is present inside the readbuffer to determine a partial message. and it also makes a security check that limits the MAXSIZE dictated by the header to avoid the parser from trying to read malicious input size.
+Suppose a client sends a packet whose header + contentsize > maxbufsize. 
+The initial loop will copy the header into the buffer, along with k < contentsize bytes (since there is not enough space to accomodate both).
+This means that the entire buffer is now filled with a single incomplete message. Now, if contentsize <= MAXSIZE, then the packet passes the check and the parser returns incomplete message. No bytes are read, and no bytes are moved, the buffer remains full. Each successive epoll cycle leads to the same result as level triggered keeps on firing that the receive buffer still has the remaining partial bytes. 
+Eventually the connection does get dropped but it does spin in the meantime. 
+To avoid this situation, it is necessary that -> 4(header bytes) + MAXSIZE <= maxbufsize.
+Any such packet that is capable of completely filling the buffer, while still not being completely received, is dropped.

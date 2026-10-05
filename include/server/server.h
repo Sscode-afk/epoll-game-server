@@ -45,7 +45,9 @@ class server {
         int getepollwaittimeout();
 
         void setepollout(connection * c,bool yes);
+        ssize_t sendbytes(connection * c,size_t tosend);
         void flushwb(connection * c);
+
         template<typename Payload>
         void sendmessage(connection * c,Payload& data);
 
@@ -55,6 +57,14 @@ class server {
         database serverdatabase;
         void handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtype);
         void handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype);
+
+        void checkresults();
+        void broadcastshutdown();
+        bool stopserver = false;
+
+        void dbresultloginhandler(connection * c,dbresultentry& res);
+        void dbresultusercheckhandler(connection * c,dbresultentry& res);
+        void dbresultnewuserhandler(connection * c,dbresultentry& res);
     public: 
         server();
         ~server();
@@ -62,6 +72,8 @@ class server {
         server(const server&) = delete; //default copy constructor is now illegal
         server& operator= (const server&) = delete; //copy assignment is illegal
 
+        bool isunauth(serverfields::connstates state);
+        bool isauth(serverfields::connstates state);
         bool init();
         void run();
 
@@ -69,17 +81,12 @@ class server {
 
 template<typename Payload>
 void server::sendmessage(connection * c,Payload& data) {
+    //all fields of data are trivially copyable. sender handles the endianness of data fields
     uint32_t payloadsize = sizeof data;
-    size_t remaining = serverfields::CLIENTWRITEbufsizemax - c->wbwriteindex;
-
-    if (remaining < (payloadsize + 4)) {
+    payloadsize = htonl(payloadsize);
+    if (!c->writebuffer.writebytes(&payloadsize,sizeof payloadsize) || !c->writebuffer.writebytes(&data,sizeof data)) {
         markdead(c);
         return;
     }
-
-    memcpy(c->writebuffer + c->wbwriteindex,&payloadsize,sizeof payloadsize);
-    c->wbwriteindex += sizeof payloadsize;
-
-    memcpy(c->writebuffer + c->wbwriteindex,&data,payloadsize);
-    c->wbwriteindex += payloadsize;
+    flushwb(c);  
 }

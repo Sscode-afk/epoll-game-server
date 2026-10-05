@@ -82,6 +82,21 @@ bool server::init() {
     int threadsinit = hthreadpool.init(serverfields::hashpoolthreadcount,hashresultqueue,hashencodedbufferlen);
     SERVERASSERT(threadsinit);
     
+    //Check if connection states follow the correct order required by the transition table
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::NONE) == 0);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::UNAUTH) == 1);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::IDLE) == 2);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::INMATCH) == 3);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::DEAD) == 4);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::LOGINDB) == 5);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::LOGINHASH) == 6);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPDBCHECK) == 7);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPHASH) == 8);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPDBWRITE) == 9);
+
+    //This invariant ensures that a connection does not spin on buffer being filled by a buggy/malicious packet
+    SERVERASSERT(serverfields::MAXpacketsize + 4 <= serverfields::CLIENTREADbufsizemax);
+
     LOGINFO("Listenerfd (%d) and Epollfd(%d) set, server init completed.",listenerfd,epollfd);
     return true;
 }
@@ -105,6 +120,8 @@ void server::run() {
         }
 
         reap();
+        checkresults();
+        if (stopserver) return;
     }
 }
 
@@ -404,7 +421,7 @@ void server::reap() {
             //the connection is already dead. this is possible for clients that were sitting
             //back in the queue, and they could not come to the front of the queue fast enough
             //in a reap cycle in which they were removed (considering queue operation happens
-            //before removal)!
+            //before removal)
             unauthqueue.pop();
         }
         else if (it->second->alive == false) {
@@ -470,31 +487,36 @@ void server::reap() {
     }
 }
 
+bool isvalidtransition(serverfields::connstates oldstate,serverfields::connstates newstate) {
+    return (serverfields::transitiontable[static_cast<size_t>(oldstate)][static_cast<size_t>(newstate)]);
+}
+
 void server::changestate(connection * conn,serverfields::connstates newstate) {
-    serverfields::connstates tochange = conn->state;
-    if (tochange == serverfields::connstates::NONE && newstate == serverfields::connstates::UNAUTH) {
-        conn->state = newstate;
-        unauthconncount++;
+    serverfields::connstates oldstate = conn->state;
+    if (!isvalidtransition(oldstate,newstate)) {
+        LOGWARNING("Invalid state transition for client(%s) from state index %zu to %zu, dropping client!",conn->tag,static_cast<size_t>(oldstate),static_cast<size_t>(newstate));
+        markdead(conn);
+        return;
     }
-    else if (tochange == serverfields::connstates::UNAUTH && newstate == serverfields::connstates::IDLE) {
-        conn->state = newstate;
+    if (isunauth(oldstate) && isauth(newstate)) {
+        //authentication success
         unauthconncount--;
         authconncount++;
         nodelink(conn);
     }
-    else if (tochange == serverfields::connstates::UNAUTH && newstate == serverfields::connstates::DEAD) {
-        conn->state = newstate;
+    else if (isauth(oldstate) && !isauth(newstate)) {
+        //DEAD is the only non AUTH state that AUTH states can go to
+        authconncount--;
+        nodeunlink(conn);
+    }
+    else if (isunauth(oldstate) && !(isunauth(newstate) || isauth(newstate))) {
         unauthconncount--;
     }
-    else if (tochange != serverfields::connstates::UNAUTH && newstate == serverfields::connstates::DEAD) {
-        //currently all non unauth states are authorized
-        conn->state = newstate;
-        nodeunlink(conn);
-        authconncount--;
+    else if (!(isunauth(oldstate) || isauth(oldstate)) && isunauth(newstate)) {
+        unauthconncount++;
     }
-    else {
-        SERVERASSERT(false);
-    }
+
+    conn->state = newstate;
 }
 
 void server::nodelink(connection * nodep) {
@@ -553,7 +575,7 @@ int server::getepollwaittimeout() {
 }
 
 void server::setepollout(connection * c,bool yes) {
-    if (yes != c->polloutactive) return;
+    if (yes == c->polloutactive) return;
 
     epoll_event ev;
     ev.data.ptr = c;
@@ -574,35 +596,253 @@ void server::setepollout(connection * c,bool yes) {
     }
 }
 
-void server::flushwb(connection * c) {
-    SERVERASSERT(c->alive == true); //This method only operates on alive clients, it is the caller's responsibility to ensure so
-    size_t tosend = c->wbwriteindex - c->wbsentindex;
-    
-    if (tosend == 0) return; //EPOLLOUT flushing when EPOLLIN before cleared the buffer already
-    ssize_t bytessent = send(c->connfd,c->writebuffer + c->wbsentindex,tosend,MSG_NOSIGNAL);
+ssize_t server::sendbytes(connection * c,size_t tosend) {
+    ssize_t bytessent = send(c->connfd,c->writebuffer.getsentpointer(),tosend,MSG_NOSIGNAL);
     if (bytessent == -1) {
         int errnum = errno;
         if (errnum == EAGAIN || errnum == EWOULDBLOCK) {
-            //send buffer is full
+            //send buffer is already full
             setepollout(c,true);
-            return;
+            return -1;
         }
         else {
             markdead(c);
-            return;
+            return -1;
         }
     }
-    
-    //casting valid as bytessent >= 0 if !=-1
-    if (static_cast<size_t>(bytessent) < tosend) {
-        c->wbsentindex += bytessent;
-        memmove(c->writebuffer,c->writebuffer + c->wbsentindex,c->wbwriteindex - c->wbsentindex);
-        setepollout(c,true);
 
+    return bytessent;
+}
+void server::flushwb(connection * c) {
+    SERVERASSERT(c->alive == true); //This method only operates on alive clients, it is the caller's responsibility to ensure so
+    size_t contiguousslots = c->writebuffer.totalcontiguousfilledslots();
+    ssize_t bytessent;
+    if ((bytessent = sendbytes(c,contiguousslots)) == -1) return;
+
+    if (static_cast<size_t>(bytessent) < contiguousslots) {
+        setepollout(c,true);
+        c->writebuffer.consumeslots(static_cast<size_t>(bytessent));
+        return;
     }
-    else if (static_cast<size_t>(bytessent) == tosend) {
-        c->wbsentindex = 0;
-        c->wbwriteindex = 0;
+    else if (contiguousslots == c->writebuffer.count) {
+        //all bytes sent in single send call
+        c->writebuffer.consumeslots(static_cast<size_t>(bytessent));
         setepollout(c,false);
+        return;
     }
+    
+    c->writebuffer.consumeslots(contiguousslots);
+    //all contiguous bytes sent, but slots to send still remain, sentpointer wraps around to 0
+    contiguousslots = c->writebuffer.totalcontiguousfilledslots();
+    if ((bytessent = sendbytes(c,contiguousslots)) == -1) return;
+    c->writebuffer.consumeslots(static_cast<size_t>(bytessent));
+
+    if (static_cast<size_t>(bytessent) < contiguousslots) {
+        setepollout(c,true);
+        return;
+    }
+
+    setepollout(c,false);
+}
+
+void server::broadcastshutdown() {
+    for (auto& connpair:connectionsmap) {
+        messages::servershutdownpacket msg;
+        sendmessage(connpair.second.get(),msg);
+    }
+    stopserver = true;
+}
+
+void server::dbresultloginhandler(connection * c, dbresultentry& res) {
+    if (c->state != serverfields::connstates::LOGINDB) {
+        LOGWARNING("Invalid state for client(%s) (NON LOGINDB), dropping client!",c->tag);
+        markdead(c);
+        return;
+    }
+    if (res.status == dbresultstatus::SUCCESS) {
+        changestate(c,serverfields::connstates::LOGINHASH);
+    }
+    else if (res.status == dbresultstatus::READNOTFOUND) {
+        changestate(c,serverfields::connstates::UNAUTH);
+        messages::serverloginresponse response(network::servresponse::LOGINFAILED);
+        sendmessage(c,response);
+    }    
+    else {
+        SERVERASSERT(0);
+    }
+}
+
+void server::dbresultusercheckhandler(connection * c,dbresultentry& res) {
+    if (c->state != serverfields::connstates::SIGNUPDBCHECK) {
+        markdead(c);
+        LOGWARNING("Invalid state for client(%s) (NON SIGNUPDBCHECK), dropping client!",c->tag);
+        return;
+    }
+    if (res.status == dbresultstatus::SUCCESS) {
+        changestate(c,serverfields::connstates::UNAUTH);
+        messages::serversignupresponse response(network::servresponse::SIGNUPNAMETAKEN);
+        sendmessage(c,response);
+    }
+    else if (res.status == dbresultstatus::READNOTFOUND) {
+        changestate(c,serverfields::connstates::SIGNUPHASH);
+        essential::hashentry hashjob{.connid = c->connid,.accountid = 0, .jtype = essential::hashpooljobtype::HASH, .password = c->passwordbuf};
+        hthreadpool.submit(std::move(hashjob));
+
+        //password no longer needed
+        explicit_bzero(c->passwordbuf.buf,sizeof c->passwordbuf.buf);
+    }
+    else {
+        SERVERASSERT(0);
+    }
+}
+
+
+void server::dbresultnewuserhandler(connection * c,dbresultentry& res) {
+    if (c->state != serverfields::connstates::SIGNUPDBWRITE) {
+        markdead(c);
+        LOGWARNING("Invalid state for client(%s) (NON SIGNUPDBWRITE), dropping client!",c->tag);
+        return;
+    }
+    if (res.status == dbresultstatus::SUCCESS) {
+        changestate(c,serverfields::connstates::IDLE);
+        messages::serversignupresponse response(network::servresponse::SIGNUPSUCCESS);
+        sendmessage(c,response);
+
+        //create a session now
+        //...
+    }
+    else if (res.status == dbresultstatus::WRITEFAILEDUNIQUE) {
+        changestate(c,serverfields::connstates::UNAUTH);
+        messages::serversignupresponse response(network::servresponse::SIGNUPNAMETAKEN);
+        sendmessage(c,response);
+    }
+    else {
+        SERVERASSERT(0);
+    }
+}
+
+void server::checkresults() {
+    std::queue<dbresultentry> dbresults;
+    serverdatabase.getresults(dbresults);
+
+    while (!dbresults.empty()) {
+        dbresultentry& res = dbresults.front();
+        if (res.status == dbresultstatus::FAILEDFATAL) {
+            LOGINFO("Broadcasting shutdown to all connections.");
+            broadcastshutdown();
+            return;
+        }  
+        
+        //discard the result if the connection object is dead
+        auto it = connectionsmap.find(res.connid);
+        if (it == connectionsmap.end()) {
+            dbresults.pop();
+            continue;
+        }
+
+        connection * c = it->second.get();
+        //If a previous result in the batch marked the connection dead.
+        if (c->alive == false) {
+            dbresults.pop();
+            continue;
+        }
+        //all non fatal packets have a jobtype set
+        switch (res.resultjob) {
+            case dbjobtype::READLOGINVERIFY : {
+                dbresultloginhandler(c,res);
+                break;
+            }
+            case dbjobtype::READCHECKIFUSEREXISTS : {
+                dbresultusercheckhandler(c,res);
+                break;
+            }
+            case dbjobtype::WRITENEWUSER : {
+                dbresultnewuserhandler(c,res);
+                break;
+            }
+            default : {
+                SERVERASSERT(0);
+            }
+        }
+
+        dbresults.pop();
+    }
+
+    std::queue<essential::hashresultentry> hashresults;
+
+    //returns false if the result queue is empty
+    if (!hashresultqueue.tryswap(hashresults)) return;
+
+    while (!hashresults.empty()) {
+        essential::hashresultentry& hashres  = hashresults.front();
+        
+        auto it = connectionsmap.find(hashres.id);
+        if (it == connectionsmap.end()) {
+            hashresults.pop();
+            continue;
+        };
+
+        connection * c = it->second.get();
+
+        if (c->alive == false) {
+            hashresults.pop();
+            continue;
+        }
+
+        if (hashres.jtype == essential::hashpooljobtype::HASH) {
+            if (c->state != serverfields::connstates::SIGNUPHASH) {
+                markdead(c);
+                LOGWARNING("Invalid state for client(%s) (NON SIGNUPHASH), dropping client!",c->tag);
+            }
+            else {
+                if (hashres.status == essential::hashresultstatus::ENCODEDONE) {
+                    changestate(c,serverfields::connstates::SIGNUPDBWRITE);
+                    serverdatabase.submitsignupjob(c->connid,c->usernamebuf,c->emailbuf,hashres.hash);
+                }
+                else if (hashres.status == essential::hashresultstatus::ENCODEFAILED) {
+                    changestate(c,serverfields::connstates::UNAUTH);
+                    
+                    messages::serversignupresponse response(network::servresponse::SIGNUPFAILED);
+                    sendmessage(c,response);
+                }
+                else {
+                    SERVERASSERT(0);
+                }
+            }
+        }
+        else if (hashres.jtype == essential::hashpooljobtype::VERIFY) {
+            if (c->state != serverfields::connstates::LOGINHASH) {
+                markdead(c);
+                LOGWARNING("Invalid state for client(%s) (NON LOGINHASH), dropping client!",c->tag);
+            }
+            else {
+                if (hashres.status == essential::hashresultstatus::VERIFYDONE) {
+                    changestate(c,serverfields::connstates::IDLE);
+                    messages::serverloginresponse response(network::servresponse::LOGINSUCCESS);
+                    sendmessage(c,response);
+
+                    //session creation
+                    //...
+                }
+                else if (hashres.status == essential::hashresultstatus::VERIFYFAIL) {
+                    changestate(c,serverfields::connstates::UNAUTH);
+                    messages::serverloginresponse response(network::servresponse::LOGINFAILED);
+                    sendmessage(c,response);
+                }
+                else {
+                    SERVERASSERT(0);
+                }
+            }
+
+        }
+    }
+
+}
+
+bool server::isunauth(serverfields::connstates state) {
+    return (state == serverfields::connstates::UNAUTH || state == serverfields::connstates::LOGINDB || state == serverfields::connstates::LOGINHASH || state == serverfields::connstates::SIGNUPDBCHECK || state == serverfields::connstates::SIGNUPHASH || state == serverfields::connstates::SIGNUPDBWRITE);
+}
+
+bool server::isauth(serverfields::connstates state) {
+    return (state == serverfields::connstates::IDLE || state == serverfields::connstates::INMATCH);
 }

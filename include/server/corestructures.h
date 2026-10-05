@@ -34,7 +34,7 @@ namespace essential {
     }
 
     enum class hashpooljobtype {HASH,VERIFY};
-    enum class hashresultstatus {VERIFYDONE,VERIFYFAIL,RANDFAILED,ENCODEFAILED,ENCODEDONE};
+    enum class hashresultstatus {VERIFYDONE,VERIFYFAIL,ENCODEFAILED,ENCODEDONE};
 
     struct hashentry {
         uint64_t connid;
@@ -44,21 +44,13 @@ namespace essential {
         fixedcharbuffer<network::maxcredentialsize + 1> password;
         fixedcharbuffer<serverfields::hashresultbufsize> hash;
     };
-    
-    struct hashverifyparams {
-        hashresultstatus result;
-    };
-
-    struct hashcreationparams {
-        hashresultstatus result;
-        fixedcharbuffer<serverfields::hashresultbufsize> hash;
-    };
 
     struct hashresultentry {
         uint64_t id;
         uint64_t accountid = 0;
         hashpooljobtype jtype;
-        std::variant<hashverifyparams,hashcreationparams> params;
+        hashresultstatus status;
+        fixedcharbuffer<serverfields::hashresultbufsize> hash;
     };
 
     template <typename T>
@@ -82,17 +74,61 @@ namespace essential {
                 tsqueue.pop();
                 return front;
             }
-            std::optional<T> trypop() {
+            bool tryswap(std::queue<T>& tempswapqueue) {
                 std::lock_guard<std::mutex> lck(mtx);
-                if (tsqueue.empty()) return std::nullopt;
-                T front = std::move(tsqueue.front());
-                tsqueue.pop();
-                return front;
+                if (tsqueue.empty()) return false;
+                tempswapqueue.swap(tsqueue);
+                return true;
             }
             void kill() {
                 std::unique_lock<std::mutex> lck(mtx);
                 killthreads = true;
                 cv.notify_all();
             }
+    };
+
+    struct circularwritebuffer {
+        size_t sentpointer = 0;
+        size_t writepointer = 0;
+        //count represents number of slots written
+        size_t count = 0;
+        uint8_t buffer[serverfields::CLIENTWRITEbufsizemax];
+
+        bool writebytes(const void * message,size_t bytescount) {
+            if (serverfields::CLIENTWRITEbufsizemax - count < bytescount) return false;
+            size_t headspace = serverfields::CLIENTWRITEbufsizemax - writepointer;
+
+            if (bytescount <= headspace) {
+                memcpy(buffer + writepointer,static_cast<const uint8_t *>(message),bytescount);
+                writepointer = (writepointer + bytescount) % serverfields::CLIENTWRITEbufsizemax;
+            }
+            else {
+                memcpy(buffer + writepointer,message,headspace);
+                writepointer = 0;
+                memcpy(buffer + writepointer,static_cast<const uint8_t *>(message) + headspace,bytescount - headspace);
+                writepointer += bytescount - headspace;
+            }
+            count += bytescount;
+            return true;
+        }
+
+        size_t totalcontiguousfilledslots() {
+            if (writepointer > sentpointer) {
+                return count;
+            }
+            else if (writepointer <= sentpointer && count > 0) {
+                return serverfields::CLIENTWRITEbufsizemax - sentpointer;
+            }
+            return count;
+        }
+
+        const uint8_t * getsentpointer() {
+            return buffer + sentpointer;
+        }
+
+        void consumeslots(size_t n) {
+            sentpointer = (sentpointer + n) % serverfields::CLIENTWRITEbufsizemax;
+            count -= n;
+        }
     };
 }

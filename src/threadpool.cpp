@@ -40,7 +40,6 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
             //Non verification path does not set account id!
             SERVERASSERT(job.accountid == 0);
             hres.jtype = essential::hashpooljobtype::HASH;
-            essential::hashcreationparams params;
 
             bool randfailed = false;
             ssize_t randres;
@@ -67,34 +66,31 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
             
             if (encoderes == ARGON2_OK) {
                 //fill wants the actual content.
-                SERVERASSERT(params.hash.fill(encodedbuf,static_cast<uint32_t>(strlen(encodedbuf))));
-                params.result = essential::hashresultstatus::ENCODEDONE;
+                SERVERASSERT(hres.hash.fill(encodedbuf,static_cast<uint32_t>(strlen(encodedbuf))));
+                hres.status = essential::hashresultstatus::ENCODEDONE;
             }
             else {
-                params.result = essential::hashresultstatus::ENCODEFAILED;
+                hres.status = essential::hashresultstatus::ENCODEFAILED;
             }
 
             explicit_bzero(job.password.buf,job.password.length);
-            hres.params.emplace<essential::hashcreationparams>(params);
             resqueue.push(std::move(hres));
         }
 
         else {
             SERVERASSERT(job.accountid != 0);
             hres.jtype = essential::hashpooljobtype::VERIFY;
-            essential::hashverifyparams params;
         
             int rs = argon2_verify(job.hash.buf,job.password.buf,job.password.length,Argon2_id);
             if (rs == ARGON2_OK) {
-                params.result = essential::hashresultstatus::VERIFYDONE;
+                hres.status = essential::hashresultstatus::VERIFYDONE;
                 hres.accountid = job.accountid;
             }
             else {
-                params.result = essential::hashresultstatus::VERIFYFAIL;
+                hres.status = essential::hashresultstatus::VERIFYFAIL;
             }
 
             explicit_bzero(job.password.buf,job.password.length);
-            hres.params.emplace<essential::hashverifyparams>(params);
             resqueue.push(std::move(hres));
         }
     }

@@ -15,7 +15,8 @@ namespace serverfields {
     inline double accepttokencost = 1.0;
     inline uint64_t ipsweepinterval = 4000; //4 seconds
 
-    enum class connstates {NONE,UNAUTH,IDLE,INMATCH,DEAD};
+    enum class connstates {NONE,UNAUTH,IDLE,INMATCH,DEAD,LOGINDB,LOGINHASH,SIGNUPDBCHECK,SIGNUPHASH,SIGNUPDBWRITE,TOTALSTATES};
+    constexpr size_t totalstatescount = static_cast<size_t>(connstates::TOTALSTATES);
 
     inline const int MAXunauthconnlimit = 2000;
     inline const int MAXauthconnlimit = 8000;
@@ -30,4 +31,18 @@ namespace serverfields {
     inline constexpr uint32_t parallelism = 1;
     inline constexpr uint32_t hashlen = 32;
     inline constexpr uint32_t saltlen = 16;
+
+    //NONE,UNAUTH,IDLE,INMATCH,DEAD,LOGINDB,LOGINHASH,SIGNUPDBCHECK,SIGNUPHASH,SIGNUPDBWRITE
+    constexpr bool transitiontable[serverfields::totalstatescount][serverfields::totalstatescount] = {
+        {0,1,0,0,1,0,0,0,0,0}, //NONE
+        {0,0,1,0,1,1,0,1,0,0}, //UNAUTH
+        {0,0,0,1,1,0,0,0,0,0}, //IDLE
+        {0,0,1,0,1,0,0,0,0,0}, //INMATCH
+        {0,0,0,0,0,0,0,0,0,0}, //DEAD
+        {0,1,0,0,1,0,1,0,0,0}, //LOGINDB
+        {0,1,1,0,1,0,0,0,0,0}, //LOGINHASH
+        {0,1,0,0,1,0,0,0,1,0}, //SIGNUPDBCHECK
+        {0,1,0,0,1,0,0,0,0,1}, //SIGNUPHASH
+        {0,1,1,0,1,0,0,0,0,0}, //SIGNUPDBWRITE 
+    };
 }
