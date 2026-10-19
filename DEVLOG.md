@@ -331,3 +331,100 @@ This means that the entire buffer is now filled with a single incomplete message
 Eventually the connection does get dropped but it does spin in the meantime. 
 To avoid this situation, it is necessary that -> 4(header bytes) + MAXSIZE <= maxbufsize.
 Any such packet that is capable of completely filling the buffer, while still not being completely received, is dropped.
+
+# 09/10/26
+
+Worked on sessions to handle reconnects and restoring state. 
+Skimming through the code and there is one thing that needs changing. Earlier, reap() running at the end of the main loop ensured that the entry at the front of the unauthqueue was never stale. Now, checkresults() runs after reap(), and it can mutate state. So, an unauth client at the front of the queue can have their state changed to non-unauth. 
+This would skip the deadline for any valid unauth entry after the one that just became stale in setting epoll timeout. I still do not want the time getter to flush stale entries in a while loop, so I think its better I use a deque to iterate without mutating the entries and just skip the ones that are stale inside gettimeout().  
+
+# 14/10/26
+
+It is now that the real concurrency related confusion has started emerging. I spent much of the past few days identifying implicit and explicit invariants that my system guarantees, and also trying to note them down so that the entire code is consistent in enforcing them. 
+
+--
+
+The broad idea is simple. The client sends a packet that prompts the server to do some work. But the server guards this work based on the state of the client. 
+The reason for that is that certain tasks like login and signup involve a strict series of state changes for the connection object that initiatied them on the server side.
+Since the execution of a task due to a packet by a client itself involves state changes, the server simply ignores such packets if its already in an intermediate state of another task for that connection.
+
+Now, the state changer method queries a transition table that lists the valid transitions from one state to another. Earlier, if an invalid transition was requested, then the client was deemed buggy or malicious and dropped.
+But, multi step tasks change the connection's state from one intermediate state to another only after the completion of the one before. The always valid transition of (any state) -> (dead) is an exception and is handled before the result is processed (success leads to state change) by skipping the result if the client died midway.
+Combined with the guard, this guarantees the invariant that a connection object CANNOT request an invalid transition under normal execution of the server. I put the condition under SERVERASSERT to make it loud instead of dropping the client.
+
+Since an async result whose issuing connection has died by the time it arrives gets popped instead of being processed, another guarantee I can assert is that a result being processed MUST have the connection in the correct state. (having a monotonically increasing connection ID is useful here.). Because an intermediate state 'S' of a task can only be changed via the result of that particular step or if the connection dies.
+
+All of above points to the fact that at any instant, a connection can only have one outstanding async operation.
+
+
+--
+
+Removed chaining from the login path. the login read inside the database no longer creates the hash job.
+The main thread will wait for the read to complete and then issue the hashjob. My earlier argument was that a hashjob is magnitudes slower than the readjob, and since login bursts are technically capped by the rate limits, the read job will always finish first. That may be true, but it is not tested. bust to apply a common approach to the entire job result flow.
+Because if the assumption is not true, a login burst might have the hash job of a particular login task complete first and that is incompatible with the invariant above.
+
+--
+
+A connection object's state can be pre-auth or post-auth and the type of requests that are worked upon by the server depends on the state of the connection object.
+async jobs are also divided into two types -> session mutating (SM) and non session mutating. 
+The main difference is that the result of SM jobs do not care about the issuing connection dying. As long as the session referenced by the account id is alive, it will mutate the session and MIGHT respond to a client (the original issuing connection or a new one) if the session is active (a connection is attached to it).
+
+Session attachment logic handles reconnects, a later authentication and brand new creation of a session. 
+Basically, at any instant, a session exists if it is a part of the session map <accountid, unique_ptr to session object> (Also, existence of a session in the map MUST mean the simultaneous existence of the <hashedtoken,accountid> entry inside the tokenmap).
+But a session is 'active', if it has a connection attached to it (the active connection id field of the object is the connection's connid and the connection has a raw pointer to the session object.). The active flag being false and the active connection id being 0 communicate the same thing. 
+
+The attachment method runs through 3 routes on a connection c -> signup, login, reconnect packet. signup is simple as in it always creates a new session (unique account id retrieved from the database).
+in login, if the session already exists, then either c can takeover the older connection if the session was active at the moment of attachment, or it could just become the active one if the session was inactive. In taking over, the older connection is marked dead. 
+The ordering of takeover and then making the newer connection the active connection gives way to this invariant: AN ALIVE, POST AUTH CONNECTION ALWAYS POINTS TOWARDS A VALID SESSION (sessions outlive connections and every unauth -> auth path has session attachment) and THE CONNECTION IS GUARANTEED TO BE THE ACTIVE CONNECTION OF THE SESSION.
+
+It took some time for me to understand the implications of this invariant.
+
+# 15/10/26
+
+Session expiry will also used an LRU expiry pattern based on the last seen field of a session.
+But session expiry and connection expiry are different.
+
+Auth connections that do use the LRU pattern are always present inside the linked list unless marked dead. I understand it as the connection representing a socket connection, or an actual physical kernel resource. So in order for it to not get freed, the connection must continuously prove its liveness through normal traffic over the wire (heartbeats, valid packets etc.) (because TCP cannot always tell if a socket has truly died).
+
+Compared to this, sessions are only linked and have a deadline set if they are inactive. While in the expiry list, if a connection attaches to the session, it automatically gets unlinked. 
+
+The reason why sessions have a conditional deadline is that first of all, sessions represent the logical state of an authenticated application. No physical resource in the sense of how file descriptors are. The other is that a session having an auth connection attached to it (being active), has its 'liveness' proven by the connection itself as long as it is alive. 
+It is only when it has no alive, authenticated connection attached to it that it must truly have a deadline set for expiry.
+
+so, another invariant: A SESSION IS IN THE EXPIRY LIST IF AND ONLY IF IT IS INACTIVE
+--
+
+Two scenarios I discovered:
+First -> 
+A connection attaches to a session such that a session S1 is created fresh. Every NEW session when it is first created issues a SINGLE cache read async job in its entire lifetime to populate its cache struct with the result.
+Now Imagine the connection dies as soon as the async operation is in flight and that the result of this operation takes so long to arrive that S1 has expired and S2 linked with the same account id was again created fresh (and another cache fetch job is outbound). Since S2 points to the same account id, the result of S1 sees that a session associated with the account id is alive and thus populates the cache of S2 with S1's fetch result. The cache filled flag is set to true. Once the second result arrives, it can assert on the connection not being in the correct state (since the previous result set it to IDLE). 
+
+Now, above is not that big of a problem considering that session timeouts are very long, and also the fact that the result of S1's fetch and S2's fetch are guaranteed identical since S1 could not mutate the database cache while it's fetch was still outbound. 
+S2's result just sees that the cache is already filled, and ignores mutating it a second time. 
+BUT, this mechanism cannot reliably detect if the same session due to some bug submitted more than one fetch job.
+
+Second ->
+This is the more serious one. Later on when session cache writes arrive, when a session expires and is thus moved out of the expiry list and deleted...before getting deleted, if the session is marked dirty, it submits one last session write job and then dies.
+As soon as this happens, another client logs in for the same account and a new session is created which submits a cache fetch job.
+Since DB job entries (reads and writes) are swapped once at start of the worker loop into the read and write queues -> during a particularly large processing batch, the read job and write job above are put in the same work batch. 
+The worker structure ensures that reads are processed before writes and their results returned.\
+This means that S2 would get a stale cache result which is then overwritten by S1's write job in the database. And in fact, subsequent S2 writes would completely overwrite S1's last write job and that information gets lost.
+
+One of the first solutions I had thought of for the second problem, was to move the fetch job inside the write queue processing. jobs of the same type are processed in order. So, the write job would be processed before the dependent read job (even though it being in the write queue makes less semantic sense, but it works). Other reads are still low latency, but since the client is as is waiting for the session fetch to complete, the latency would increase by some amount. This meant that jobs were not just distinguished READ or WRITE types.
+
+Instead of above, there is a solution that solves both problems. And it is very simple.
+Sessions do not die (removed from sessionmap) until all outbound async jobs are completed.
+If a session expires, it is removed from the expiry list and still has outbound async jobs (a counter incremented at submit and decremented at result), it is marked to be draining these jobs. (Otherwise, the session can die.).
+
+At the decrement site, if session is draining and has 0 outbound jobs, delete it. 
+While a session bound async job is out, the session cannot expire at all. So the results always arrive at a valid session. For the first case, the double fetch simply becomes an assert on cachefilled being FALSE always. For the second case, only after the final write is completed that the session dies. So the subsequent session read can never come inside the same batch since the subsequent session creation cannot happen while a sessiona addressed by the same account id already exists.
+--
+
+# 18/10/26
+
+Circular dependancy issue arised in my header files. Fixed it and got to learn something.
+session.h was including corestructures.h and vice versa. Now, session.h used an actual struct as a member of its session object. Whereas corestructure needed a pointer to a session object inside session.h in another one of its structs. 
+
+What I learnt is that in c++, when a pointer is declared to some type, the compiler only needs to know that the type exists without knowing what it contains inside the header file for it to compile without problems. But when the actual object is used, the compiler needs to know the exact layout (stored in the included header file) to determine how much memory the overall object takes.
+
+This means that forward declaring the session object inside corestructures.h simply eliminates the need to include session.h and break the circular dependancy. 

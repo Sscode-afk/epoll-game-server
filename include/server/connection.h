@@ -5,8 +5,15 @@
 #include "server/serversettings.h"
 #include "proto/objects.h"
 #include "proto/settings.h"
-#include "server/corestructures.h"
-struct connection {
+#include "server/session.h"
+
+enum class epollfdtype {LISTENER,RESULT,CONNECTION};
+
+struct basefd {
+    epollfdtype type;
+};
+
+struct connection : public basefd {
     connection() {
         connfd = -1;
     }
@@ -42,4 +49,6 @@ struct connection {
     fixedcharbuffer<network::maxcredentialsize+1> usernamebuf;
     fixedcharbuffer<network::maxcredentialsize+1> passwordbuf;
     fixedcharbuffer<network::maxemailsize + 1> emailbuf;
+
+    Session * sess = nullptr;
 };

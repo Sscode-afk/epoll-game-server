@@ -5,19 +5,22 @@
 #include <optional>
 #include <sys/random.h>
 #include "core/log.h"
+#include <sys/eventfd.h>
 extern "C" {
     #include <argon2.h>
 }
 
 hashpool::~hashpool() {
-    jobqueue.kill();
-    for (auto& thread:threads) {
-        thread.join();
-    }
+    stop();
 }
 
-void hashpool::submit(essential::hashentry&& job) {
-    jobqueue.push(std::move(job));
+void hashpool::stop() {
+    jobqueue.kill(); //idempotent
+    for (auto& thread:threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
 }
 
 void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resqueue) {
@@ -43,6 +46,7 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
 
             bool randfailed = false;
             ssize_t randres;
+
             while (true) {
                 randres = getrandom(saltbuf,serverfields::saltlen,0);
                 if (randres == -1) {
@@ -93,15 +97,55 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
             explicit_bzero(job.password.buf,job.password.length);
             resqueue.push(std::move(hres));
         }
+
+        //After pushing in either case, notify the main thread
+        uint64_t val = 1;
+        ssize_t evwrite = eventfd_write(resulteventfd,val);
+        if (evwrite == -1) {
+            int errnum = errno;
+            LOGERRORNUM(errnum,"HASHPOOL: eventfd write err!");
+            SERVERASSERT(0);
+        }
+
+        SERVERASSERT(static_cast<size_t>(evwrite) == sizeof val);
     }
 }
 
-bool hashpool::init(int n,essential::threadsafequeue<essential::hashresultentry>& rq,size_t len) {
+bool hashpool::init(int n,essential::threadsafequeue<essential::hashresultentry>& rq,size_t len, int efd) {
     encodedlen = len;
+    resulteventfd = efd;
+
+    SERVERASSERT(encodedlen > 0);
+    SERVERASSERT(resulteventfd >= 0);
+
     threads.reserve(n);
     for (int i = 0; i < n; i++) {
         threads.emplace_back(&hashpool::work,this,std::ref(rq));
     }
 
     return true;
+}
+
+void hashpool::submithashcreationjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& password) {
+    essential::hashentry h;
+    h.connid = connid;
+    h.password = password;
+    h.jtype = essential::hashpooljobtype::HASH;
+    SERVERASSERT(h.hash.length == 0 && h.accountid == 0);
+
+    jobqueue.push(std::move(h));
+}
+
+void hashpool::submithashverificationjob(uint64_t connid,uint64_t accid,fixedcharbuffer<network::maxcredentialsize + 1>& password,fixedcharbuffer<serverfields::hashresultbufsize>& hash) {
+    SERVERASSERT(accid > 0);
+    essential::hashentry h;
+    h.connid = connid;
+    h.accountid = accid;
+    h.jtype = essential::hashpooljobtype::VERIFY;
+    h.password = password;
+
+    //verification readjob ensures that the hash length is correct!
+    h.hash = hash;
+    
+    jobqueue.push(std::move(h));
 }

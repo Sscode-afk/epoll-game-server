@@ -21,10 +21,10 @@ struct measure_t {
         const char * val;
 
         bool logged = false;
-        measure_t(const char * value,timerprecision type = timerprecision::MILLI) {
+        measure_t(const char * task,timerprecision type = timerprecision::MILLI) {
             current = now(type);
             mtype = type;
-            val = value;
+            val = task;
         }
         ~measure_t() {
             if (!logged) log();

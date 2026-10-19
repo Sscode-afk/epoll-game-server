@@ -113,15 +113,6 @@ No heap allocations on any log path. Logging uses a stack buffer and a `appender
 
 The main thread and the database thread acquire the respective queue locks a single time in one processing loop and swap the elements into a local queue. This avoids having to hold the lock while each element is popped and processed allowing the other thread to access the queue in the meanwhile. 
 
-### Chaining, but only one way
-
-For login, the database read job that fetches the account id and the stored password hash, itself creates the hashjob to verify it. This means it carries a password parameter along with the username (to pass the password to the hashjob). 
-A similar situation arises during signup. Once the provided password is hashed, there is an oppurtunity for chaining by having the hashing thread also push a writejob directly without responding the status of the hash to the server first so that the server creates the writejob. 
-However this is not done because it would need a hashjob entry to carry information like username, email etc. that is entirely not related to a hash. 
-
-This differs from the first case, where the things required for the hashjob are present inside the database itself. Having the read job carry the password is semantically less ambigious.
-It is also because the extra set of fields required for signup can grow with time depending on the service. login just takes a username and a password.
-
 ### No decoy hashing on login miss
 
 During login, if the username is not found, the system does not hash against a fix decoy hash. What this aimed to prevent was allowing attackers to analyze the timing difference when the username is found (hundreds of ms) and when it is not found (returned immediately without hashing) to guess which usernames already exist inside the database.

@@ -5,24 +5,31 @@
 #include <memory>
 #include "server/corestructures.h"
 #include <queue>
+#include <deque>
 #include "core/threadpool.h"
 #include "core/database.h"
+
+#include "server/session.h"
 
 class server {
     private:
         int epollfd;
         int listenerfd;
         int reservefd;
+        int resulteventfd;
 
         int unauthconncount;
         int authconncount;
+
+        basefd listener;
+        basefd wakeupevent;
         
         uint64_t clientsid;
 
         bool listenerdisabled;
         std::unordered_map<uint64_t,std::unique_ptr<connection>> connectionsmap;
-        connection head;
-        connection tail;
+        connection connheadsentinel;
+        connection conntailsentinel;
         
         int processevents(epoll_event& event);
         void handlemessage(connection * c);
@@ -30,17 +37,28 @@ class server {
         void markdead(connection * c);
 
         std::vector<uint64_t> toremove;
-        std::queue<uint64_t> unauthqueue;
+        std::deque<uint64_t> unauthqueue;
 
         //ip
         std::unordered_map<uint32_t,std::unique_ptr<essential::IP>> ipmap;
         uint64_t lastipsweeptime;
 
+        //session
+        std::unordered_map<uint64_t,std::unique_ptr<Session>> sessionmap;
+        Session sessheadsentinel;
+        Session sesstailsentinel;
+        std::unordered_map<sessiontoken,uint64_t,tokenhasher> tokenmap; 
+        void attachsession(connection * c,serverfields::sessioncreationstage stage,uint64_t accid);
+
         void changestate(connection * conn,serverfields::connstates newstate);
         void reap();
-        void nodelink(connection * nodep);
-        void nodeunlink(connection * nodep);
-        void nodeshifttail(connection * nodep);
+
+        void connectionnodelink(connection * nodep);
+        void connectionnodeunlink(connection * nodep);
+        void connectionnodeshifttail(connection * nodep);
+
+        void sessionnodelink(Session * nodep);
+        void sessionnodeunlink(Session * nodep);
 
         int getepollwaittimeout();
 
@@ -50,6 +68,7 @@ class server {
 
         template<typename Payload>
         void sendmessage(connection * c,Payload& data);
+        void sendlobbyinfo(connection * c, fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email, uint64_t emblems);
 
         hashpool hthreadpool;
         essential::threadsafequeue<essential::hashresultentry> hashresultqueue;
@@ -65,6 +84,14 @@ class server {
         void dbresultloginhandler(connection * c,dbresultentry& res);
         void dbresultusercheckhandler(connection * c,dbresultentry& res);
         void dbresultnewuserhandler(connection * c,dbresultentry& res);
+        void dbresultgetusercachehandler(connection * c,Session * s,dbresultentry& res);
+
+        connection * getaliveconnptr(uint64_t connid);
+        essential::dbdispatcherparams analyzedbresulttype(dbresultentry& res);
+
+        Session * getsession(connection * c);
+        void deletesession(Session * s);
+        void sessionpostauthtrydelete(Session * s);
     public: 
         server();
         ~server();

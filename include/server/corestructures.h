@@ -11,6 +11,9 @@
 #include <condition_variable>
 #include <variant>
 
+struct connection; //forward declaring for use
+struct Session;
+
 namespace essential {
     struct tokenbucket {
         uint64_t lastseen;
@@ -81,6 +84,8 @@ namespace essential {
                 return true;
             }
             void kill() {
+                //idempotent for stop()
+                if (killthreads == true) return;
                 std::unique_lock<std::mutex> lck(mtx);
                 killthreads = true;
                 cv.notify_all();
@@ -130,5 +135,12 @@ namespace essential {
             sentpointer = (sentpointer + n) % serverfields::CLIENTWRITEbufsizemax;
             count -= n;
         }
+    };
+
+    enum class dbdispatcherresult {SESSIONBOUNDJOB,NONSESSIONBOUNDJOB};
+    struct dbdispatcherparams {
+        dbdispatcherresult type;
+        connection * connptr = nullptr;
+        Session * sessptr = nullptr;
     };
 }

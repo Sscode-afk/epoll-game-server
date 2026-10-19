@@ -27,10 +27,11 @@ add_library(server_lib STATIC
     src/threadpool.cpp
     src/handlers.cpp
     src/database.cpp
+    src/session.cpp
 )
 
 target_include_directories(server_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(server_lib PRIVATE project_warnings argon2 sqlite3)
+target_link_libraries(server_lib PRIVATE project_warnings argon2 sqlite3 crypto)
 
 add_executable(server src/main.cpp)
 
