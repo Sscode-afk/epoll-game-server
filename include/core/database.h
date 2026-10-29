@@ -132,11 +132,11 @@ struct database {
 
         bool init(size_t encodelength,int reseventfd);
         void dbinterr(int errcode, const char * stage);
-        void submitloginauthjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxcredentialsize + 1>& password);
+        void submitloginauthjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username);
         void submitsignupjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email, fixedcharbuffer<serverfields::hashresultbufsize>& hash);
         void submituserexistencejob(uint64_t connid, fixedcharbuffer<network::maxcredentialsize + 1>& username);
         void submitfetchusercachejob(uint64_t connid,uint64_t accountid);
-        void submitupdateusercachejob(uint64_t connid,uint64_t accountid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email,uint64_t emblems);
+        void submitupdateusercachejob(uint64_t connid,uint64_t accountid,uint64_t emblems);
 
         void killdb();
         void getresults(std::queue<dbresultentry>& localqueue);

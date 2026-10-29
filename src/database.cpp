@@ -408,7 +408,7 @@ bool database::init(size_t encodelength, int efd) {
     return true;
 }
 
-void database::submitloginauthjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize+1>& username,fixedcharbuffer<network::maxcredentialsize+1>& password) {
+void database::submitloginauthjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize+1>& username) {
     dbreadentry readjob;
     readjob.connid = connid;
     readjob.entrytype = dbjobtype::READLOGINVERIFY;
@@ -468,7 +468,7 @@ void database::submitfetchusercachejob(uint64_t connid,uint64_t accid) {
  
 }
 
-void database::submitupdateusercachejob(uint64_t connid,uint64_t accountid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email,uint64_t emblems) {
+void database::submitupdateusercachejob(uint64_t connid,uint64_t accountid,uint64_t emblems) {
     dbwriteentry writejob;
     writejob.connid = connid;
     writejob.accountid = accountid;
@@ -501,7 +501,7 @@ sqlite3 * database::getdb() {
 }
 
 void database::stop() {
-    if (killthread == true) true;
+    if (killthread == true) return;
     {
         std::lock_guard<std::mutex> lck(mtx);
         killthread = true;

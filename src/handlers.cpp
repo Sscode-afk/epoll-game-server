@@ -83,5 +83,5 @@ void server::handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype
     SERVERASSERT(c->passwordbuf.fill(packet.password,static_cast<uint32_t>(passsize)),"");
 
     //push the verify database read job into the database readqueue via the submit method
-    serverdatabase.submitloginauthjob(c->connid,c->usernamebuf,c->passwordbuf);
+    serverdatabase.submitloginauthjob(c->connid,c->usernamebuf);
 }

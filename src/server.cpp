@@ -360,7 +360,7 @@ int server::processevents(epoll_event& event) {
             flushresult fres = flushbytes(c->connfd,c->writebuffer);
             switch (fres.status) {
                 case flushstatus::ERROR : {
-                    LOGWARNINGNUM(fres.errcode,"Socket error while writing on client(%s), dropping client!");
+                    LOGWARNINGNUM(fres.errcode,"Socket error while writing on client(%s), dropping client!",c->tag);
                     markdead(c);
                     break;
                 }

@@ -32,7 +32,7 @@ readresult fillreadbuffer(int fd, networkreadbuffer& readbuf);
 sendbytesresult sendbytes(int fd,size_t tosend,circularwritebuffer& buf);
 flushresult flushbytes(int fd,circularwritebuffer& buf);
 
-template<typename Payload>
+template <typename Payload>
 fillmessageresult fillwritebuffer(Payload& data,circularwritebuffer& buf,int fd) {
     //all fields of data are trivially copyable. sender handles the endianness of data fields
     uint32_t payloadsize = sizeof data;
