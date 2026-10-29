@@ -2,12 +2,7 @@
 #include <unistd.h>
 namespace serverfields {
     inline const size_t EPEVENTbufsize = 128;
-    inline constexpr size_t CLIENTWRITEbufsizemax = 16 * 1024; 
-    inline constexpr size_t CLIENTREADbufsizemax = 16 * 1024;
-
-    inline const size_t MINpacketsize = 1; //single byte for type
-    inline constexpr size_t MAXpacketsize = 4 * 1024; 
-
+    
     inline const size_t MAXipconcurrentusers = 25;
     inline const double iptbcap = 15;
     inline const double iptbrefillrate = 0.0005; //per millisecond

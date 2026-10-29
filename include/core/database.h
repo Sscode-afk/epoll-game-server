@@ -21,14 +21,10 @@ struct readcheckuserparams {
     fixedcharbuffer<network::maxcredentialsize + 1> username;
 };
 
-struct readusercacheparams {
-    uint64_t useraccountid;
-};
+struct readusercacheparams {}; //tag only to identify the type of statement to use, uses account id already present in the session bound read job
 
 //write params
 struct writeupdatecacheparams {
-    uint64_t accountid;
-    char username[network::maxcredentialsize +1];
     uint64_t emblems;
 };
 
@@ -96,6 +92,11 @@ struct getuserdatastmt {
     int usernamecolumnindex,emailcolumnindex,emblemscolumnindex;
 };
 
+struct updateusercachestmt {
+    sqlite3_stmt * s = nullptr;
+    int bindemblemsindex,bindaccidindex;
+};
+
 struct database {
     private:
         sqlite3* db = nullptr;
@@ -118,6 +119,8 @@ struct database {
 
         bool killthread;
         int resulteventfd = -1;
+
+        void signalmainthread();
     public:
         size_t hashencodedlength = 0;
 
@@ -125,6 +128,7 @@ struct database {
         getuserdatastmt getusercache;
         adduserstmt putnewuser;
         userexistencestmt checkuser;
+        updateusercachestmt updatecache;
 
         bool init(size_t encodelength,int reseventfd);
         void dbinterr(int errcode, const char * stage);
@@ -132,6 +136,7 @@ struct database {
         void submitsignupjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email, fixedcharbuffer<serverfields::hashresultbufsize>& hash);
         void submituserexistencejob(uint64_t connid, fixedcharbuffer<network::maxcredentialsize + 1>& username);
         void submitfetchusercachejob(uint64_t connid,uint64_t accountid);
+        void submitupdateusercachejob(uint64_t connid,uint64_t accountid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email,uint64_t emblems);
 
         void killdb();
         void getresults(std::queue<dbresultentry>& localqueue);

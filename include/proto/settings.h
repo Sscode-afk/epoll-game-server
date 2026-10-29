@@ -5,6 +5,9 @@ namespace network {
     inline constexpr size_t maxcredentialsize = 15;
     inline constexpr size_t maxemailsize = 254; 
 
+    inline const size_t MINpacketsize = 1; //single byte for type
+    inline constexpr size_t MAXpacketsize = 4 * 1024; 
+    
     enum class servresponse {
         SIGNUPSUCCESS = 0,
         SIGNUPCREDTOOSHORT = 1,
@@ -14,4 +17,7 @@ namespace network {
         LOGINCREDTOOSHORT = 5,
         LOGINSUCCESS = 6
     };
+
+    inline constexpr size_t clientreadbuffersizemax = 16 * 1024;
+    inline constexpr size_t clientwritebuffersizemax = 16 * 1024;
 }

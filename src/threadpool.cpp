@@ -41,7 +41,7 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
 
         if (job.jtype == essential::hashpooljobtype::HASH) {
             //Non verification path does not set account id!
-            SERVERASSERT(job.accountid == 0);
+            SERVERASSERT(job.accountid == 0,"HASHPOOL: hash job already found account id set");
             hres.jtype = essential::hashpooljobtype::HASH;
 
             bool randfailed = false;
@@ -64,13 +64,13 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
                 break;
             }
 
-            SERVERASSERT(!randfailed && randres == serverfields::saltlen);
+            SERVERASSERT(!randfailed && randres == serverfields::saltlen, "HASHPOOL: Random salt generation failed");
 
             int encoderes = argon2id_hash_encoded(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,job.password.buf,job.password.length,saltbuf,serverfields::saltlen,serverfields::hashlen,encodedbuf,sizeof encodedbuf);
             
             if (encoderes == ARGON2_OK) {
                 //fill wants the actual content.
-                SERVERASSERT(hres.hash.fill(encodedbuf,static_cast<uint32_t>(strlen(encodedbuf))));
+                SERVERASSERT(hres.hash.fill(encodedbuf,static_cast<uint32_t>(strlen(encodedbuf))),"HASHPOOL: Failed filling bytes into the result hash buffer from the encoded buffer");
                 hres.status = essential::hashresultstatus::ENCODEDONE;
             }
             else {
@@ -82,7 +82,7 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
         }
 
         else {
-            SERVERASSERT(job.accountid != 0);
+            SERVERASSERT(job.accountid != 0, "HASHPOOL: Verification job must have an account id to propogate to the result, account id not already set");
             hres.jtype = essential::hashpooljobtype::VERIFY;
         
             int rs = argon2_verify(job.hash.buf,job.password.buf,job.password.length,Argon2_id);
@@ -104,10 +104,10 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
         if (evwrite == -1) {
             int errnum = errno;
             LOGERRORNUM(errnum,"HASHPOOL: eventfd write err!");
-            SERVERASSERT(0);
+            SERVERFAIL("HASHPOOL: Eventfd write failure");
         }
 
-        SERVERASSERT(static_cast<size_t>(evwrite) == sizeof val);
+        SERVERASSERT(static_cast<size_t>(evwrite) == sizeof val,"");
     }
 }
 
@@ -115,8 +115,8 @@ bool hashpool::init(int n,essential::threadsafequeue<essential::hashresultentry>
     encodedlen = len;
     resulteventfd = efd;
 
-    SERVERASSERT(encodedlen > 0);
-    SERVERASSERT(resulteventfd >= 0);
+    SERVERASSERT(encodedlen > 0, "HASHPOOL: encodedlen parameter is invalid (0)");
+    SERVERASSERT(resulteventfd >= 0, "HASHPOOL: resulteventfd parameter is invalid");
 
     threads.reserve(n);
     for (int i = 0; i < n; i++) {
@@ -131,13 +131,13 @@ void hashpool::submithashcreationjob(uint64_t connid,fixedcharbuffer<network::ma
     h.connid = connid;
     h.password = password;
     h.jtype = essential::hashpooljobtype::HASH;
-    SERVERASSERT(h.hash.length == 0 && h.accountid == 0);
+    SERVERASSERT(h.hash.length == 0 && h.accountid == 0, "HASHPOOL: hash creation job must have accountid and hash fields empty");
 
     jobqueue.push(std::move(h));
 }
 
 void hashpool::submithashverificationjob(uint64_t connid,uint64_t accid,fixedcharbuffer<network::maxcredentialsize + 1>& password,fixedcharbuffer<serverfields::hashresultbufsize>& hash) {
-    SERVERASSERT(accid > 0);
+    SERVERASSERT(accid > 0, "HASHPOOL: hash verification job must have accountid parameter non zero");
     essential::hashentry h;
     h.connid = connid;
     h.accountid = accid;

@@ -428,3 +428,18 @@ session.h was including corestructures.h and vice versa. Now, session.h used an 
 What I learnt is that in c++, when a pointer is declared to some type, the compiler only needs to know that the type exists without knowing what it contains inside the header file for it to compile without problems. But when the actual object is used, the compiler needs to know the exact layout (stored in the included header file) to determine how much memory the overall object takes.
 
 This means that forward declaring the session object inside corestructures.h simply eliminates the need to include session.h and break the circular dependancy. 
+
+# 29/10/26
+
+Could barely get enough work done in considering this log is after 11 days mainly due to assessments and college projects.
+Regardless, I did do a few things.
+First of all, it is time to build a small client to actually test the server (although for benchmarking, simulated sockets will be used). Since I have done SFML in the past and because I wanted to make it graphical for some reason (matchmaking), the main issue was getting SFML itself. In the past, doing the linking and getting the version right was a headache since I was not using cmake. I learnt about its fetch content module. And I wanted to apply it here.
+Basically, instead of having the users manually ensure that the right SFML version is installed and configured to run first, I can use this module to automatically download and build only the required components of SFML as a part of the overall build itself. In CMakeLists.txt for the client, I declare the link where fetch content can find the source code. This allows it to ensure that the exact version is fetched and built. There were also some handy 'extras' that I found while researching this, so I added them in the cmake file. (suppressing SFML warnings since I have my own flags for them etc.).
+
+But the more important part for me was the realisation that Socket behavior for the client and the server is identical. Both sides prefix headers on outgoing packets, both read into a buffer and then run a parse loop, both react based on the result of these operations and must handle partial reads and writes. Instead of writing separate code for sending and receiving messages for the client that would literally be the same as the server's (apart from what they do in response to the results of these operations), I can just have them share it.
+All the header files inside include/proto/ and their implementations inside src/ are the only things that the client and the server share (which was the parser and the settings before the change). 
+Before, the methods in the server code that do the low level stuff and put bytes on the wire or put bytes in a read buffer to parse are also coupled with server specific objects and manipulations (connection objects, markdead() etc.). The structures that allow this movement of bytes from/into the connection buffers onto/from the wire are also specific to the servers.
+So what I did was refactor them and put them inside a new net.h header (with implementation in net.cpp). The same methods are now written in a way that they accept a generic file descriptor, performs low level I/O on it and then return status enums. 
+The server and client separately can then use the common methods, and switch on the result.
+
+This has also made the code look cleaner and has a nice property that now those same methods can be tested in isolation without having to have mock connection objects and server specific methods that mutate connections.

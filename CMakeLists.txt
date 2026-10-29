@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.22)
 project(GAMEPROJ CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -22,7 +22,6 @@ add_library(server_lib STATIC
     src/log.cpp
     src/socket.cpp
     src/server.cpp
-    src/parser.cpp
     src/tools.cpp
     src/threadpool.cpp
     src/handlers.cpp
@@ -33,7 +32,17 @@ add_library(server_lib STATIC
 target_include_directories(server_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(server_lib PRIVATE project_warnings argon2 sqlite3 crypto)
 
-add_executable(server src/main.cpp)
+add_library(common_proto STATIC 
+    src/parser.cpp
+    src/net.cpp
+)
+target_include_directories(common_proto PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/proto)
 
+add_executable(server src/main.cpp)
+target_link_libraries(server_lib PUBLIC common_proto)
 target_link_libraries(server PRIVATE server_lib project_warnings)
 
+option(BUILD_CLIENT "Build the client" ON)
+if (BUILD_CLIENT) 
+    add_subdirectory(client)
+endif()

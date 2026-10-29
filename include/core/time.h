@@ -8,7 +8,7 @@ enum class timerprecision {MILLI,MICRO};
 inline uint64_t now(timerprecision type = timerprecision::MILLI) {
     timespec ts;
     int clockgettimesuccess = clock_gettime(CLOCK_BOOTTIME,&ts);
-    SERVERASSERT(clockgettimesuccess!=-1);
+    SERVERASSERT(clockgettimesuccess!=-1,"clock_gettime failed");
 
     if (type == timerprecision::MILLI)  return (uint64_t)ts.tv_sec * 1000 + (ts.tv_nsec/1000000);
     return (uint64_t)ts.tv_sec * 1000000 + (ts.tv_nsec/1000);

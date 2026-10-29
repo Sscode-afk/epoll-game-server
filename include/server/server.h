@@ -10,6 +10,8 @@
 #include "core/database.h"
 
 #include "server/session.h"
+#include "proto/net.h"
+#include "core/log.h"
 
 class server {
     private:
@@ -32,6 +34,9 @@ class server {
         connection conntailsentinel;
         
         int processevents(epoll_event& event);
+
+        template <typename T>
+        void sendmessage(connection * c, T& payload);
         void handlemessage(connection * c);
         
         void markdead(connection * c);
@@ -63,11 +68,7 @@ class server {
         int getepollwaittimeout();
 
         void setepollout(connection * c,bool yes);
-        ssize_t sendbytes(connection * c,size_t tosend);
-        void flushwb(connection * c);
 
-        template<typename Payload>
-        void sendmessage(connection * c,Payload& data);
         void sendlobbyinfo(connection * c, fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email, uint64_t emblems);
 
         hashpool hthreadpool;
@@ -106,14 +107,32 @@ class server {
 
 };
 
-template<typename Payload>
-void server::sendmessage(connection * c,Payload& data) {
-    //all fields of data are trivially copyable. sender handles the endianness of data fields
-    uint32_t payloadsize = sizeof data;
-    payloadsize = htonl(payloadsize);
-    if (!c->writebuffer.writebytes(&payloadsize,sizeof payloadsize) || !c->writebuffer.writebytes(&data,sizeof data)) {
-        markdead(c);
-        return;
+template <typename T>
+void server::sendmessage(connection * c,T& payload) {
+    fillmessageresult sendres = fillwritebuffer(payload,c->writebuffer,c->connfd);
+    switch (sendres.status) {
+        case fillmessagestatus::ERROR : {
+            LOGWARNINGNUM(sendres.errcode,"Socket error while writing on client(%s), dropping client!",c->tag);
+            markdead(c);
+            return;
+        }
+        case fillmessagestatus::APPLICATIONBUFFERFULL : {
+            LOGWARNING("No space left in writebuffer for client(%s), dropping client!",c->tag);
+            markdead(c);
+            return;
+        }
+        case fillmessagestatus::PARTIALFLUSH :
+        case fillmessagestatus::SOCKETBUFFERFULL : {
+            setepollout(c,true);
+            return;
+        }
+        case fillmessagestatus::FULLFLUSH : {
+            setepollout(c,false);
+            return;
+        }
+        case fillmessagestatus::INVALID : {
+            SERVERFAIL("Unknown enum status returned by fillwritebuffer(...)");
+            return;
+        }
     }
-    flushwb(c);  
 }

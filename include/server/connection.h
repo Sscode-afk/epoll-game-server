@@ -32,11 +32,8 @@ struct connection : public basefd {
 
     sockaddr_in connaddr;
 
-    uint8_t readbuffer[serverfields::CLIENTREADbufsizemax];
-    size_t rbreadindex;
-    size_t rbwriteindex;
-
-    essential::circularwritebuffer writebuffer ;
+    networkreadbuffer readbuffer;
+    circularwritebuffer writebuffer;
 
     char tag[4 + 20 + INET_ADDRSTRLEN + 2]; //"conn {max uint64t} {maxipv4addr}\0"
 

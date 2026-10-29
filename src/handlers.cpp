@@ -6,7 +6,7 @@
 #include <vector>
 
 void server::handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtype) {
-    SERVERASSERT(c->state != serverfields::connstates::NONE && c->state != serverfields::connstates::DEAD);
+    SERVERASSERT(c->state != serverfields::connstates::NONE && c->state != serverfields::connstates::DEAD,"Impossible state encountered for connection in signup handler (NONE, DEAD)");
     
     //Ignore signup requests from connections that are not in the unauth state (already mid-signup or duplicates)
     if (c->state != serverfields::connstates::UNAUTH) return;
@@ -20,9 +20,9 @@ void server::handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtyp
     packet.type = mtype;
     start += 1;
 
-    bytereader(packet.username,c->readbuffer + start,sizeof packet.username,start);
-    bytereader(packet.password,c->readbuffer + start,sizeof packet.password,start);
-    bytereader(packet.email,c->readbuffer + start,sizeof packet.email,start);
+    bytereader(packet.username,c->readbuffer.buf + start,sizeof packet.username,start);
+    bytereader(packet.password,c->readbuffer.buf + start,sizeof packet.password,start);
+    bytereader(packet.email,c->readbuffer.buf + start,sizeof packet.email,start);
     
     size_t usersize = strnlen(packet.username,sizeof packet.username);
     size_t passsize = strnlen(packet.password,sizeof packet.password);
@@ -40,15 +40,15 @@ void server::handlesignup(connection * c,size_t start,uint32_t size,uint8_t mtyp
         return;
     }    
     
-    SERVERASSERT(c->usernamebuf.fill(packet.username,static_cast<uint32_t>(usersize)));
-    SERVERASSERT(c->passwordbuf.fill(packet.password,static_cast<uint32_t>(passsize)));
-    SERVERASSERT(c->emailbuf.fill(packet.email,static_cast<uint32_t>(emailsize)));
+    SERVERASSERT(c->usernamebuf.fill(packet.username,static_cast<uint32_t>(usersize)),"");
+    SERVERASSERT(c->passwordbuf.fill(packet.password,static_cast<uint32_t>(passsize)),"");
+    SERVERASSERT(c->emailbuf.fill(packet.email,static_cast<uint32_t>(emailsize)),"");
 
     serverdatabase.submituserexistencejob(c->connid,c->usernamebuf);
 }
 
 void server::handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype) {
-    SERVERASSERT(c->state != serverfields::connstates::NONE && c->state != serverfields::connstates::DEAD);
+    SERVERASSERT(c->state != serverfields::connstates::NONE && c->state != serverfields::connstates::DEAD,"Impossible state encountered for connection in signup handler (NONE, DEAD)");
     if (c->state != serverfields::connstates::UNAUTH) return;
 
     if (static_cast<size_t>(size) != sizeof(messages::authpacket)) {
@@ -61,8 +61,8 @@ void server::handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype
     packet.type = mtype;
     start += 1;
 
-    bytereader(packet.username,c->readbuffer + start,sizeof packet.username,start);
-    bytereader(packet.password,c->readbuffer + start,sizeof packet.password,start);
+    bytereader(packet.username,c->readbuffer.buf + start,sizeof packet.username,start);
+    bytereader(packet.password,c->readbuffer.buf + start,sizeof packet.password,start);
 
     size_t usersize = strnlen(packet.username,sizeof packet.username);
     size_t passsize = strnlen(packet.password,sizeof packet.password);
@@ -79,8 +79,8 @@ void server::handlelogin(connection * c,size_t start,uint32_t size,uint8_t mtype
         return;
     } 
 
-    SERVERASSERT(c->usernamebuf.fill(packet.username,static_cast<uint32_t>(usersize))); //fill adds the null terminator itself
-    SERVERASSERT(c->passwordbuf.fill(packet.password,static_cast<uint32_t>(passsize)));
+    SERVERASSERT(c->usernamebuf.fill(packet.username,static_cast<uint32_t>(usersize)),""); //fill adds the null terminator itself
+    SERVERASSERT(c->passwordbuf.fill(packet.password,static_cast<uint32_t>(passsize)),"");
 
     //push the verify database read job into the database readqueue via the submit method
     serverdatabase.submitloginauthjob(c->connid,c->usernamebuf,c->passwordbuf);

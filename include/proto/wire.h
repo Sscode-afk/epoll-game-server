@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include "proto/settings.h"
+#include "settings.h"
 
 namespace messages {
     struct __attribute__((packed)) authpacket {

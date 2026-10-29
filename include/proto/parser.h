@@ -1,8 +1,9 @@
 #pragma once
 #include <unistd.h>
 #include <stdint.h>
+#include "objects.h"
 
-enum class parseresult {OUTOFBOUNDSMSG,INCOMPLETEMESSAGE,SUCCESS};
+enum class parseresult {OUTOFBOUNDSMSG,INCOMPLETEMESSAGE,SUCCESS,ALLREAD};
 void bytereader(void * dest,void * source,size_t bytes,size_t& pointer);
 struct parsedata {
     uint8_t payloadtype = 0;
@@ -11,4 +12,4 @@ struct parsedata {
     parseresult res;
 };
 
-parsedata parse(uint8_t* readbuffer,size_t& readpointer,size_t& writepointer);
+parsedata parse(networkreadbuffer& readbuf);

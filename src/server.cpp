@@ -18,6 +18,7 @@
 #include "core/database.h"
 #include "server/session.h"
 #include <sys/eventfd.h>
+#include "proto/net.h"
 
 extern "C" {
     #include <argon2.h>
@@ -101,31 +102,30 @@ bool server::init() {
     sesstailsentinel.prev = &sessheadsentinel;
 
     size_t hashencodedbufferlen = argon2_encodedlen(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,serverfields::saltlen,serverfields::hashlen,Argon2_id);
-    SERVERASSERT(hashencodedbufferlen <= serverfields::hashresultbufsize);
+    SERVERASSERT(hashencodedbufferlen <= serverfields::hashresultbufsize,"Insufficient hash buffer size");
     //encoded len includes the null terminator, hashing will not use the fill() method of the fixed charbuf
     //so above condition is sufficient.
 
     int threadsinit = hthreadpool.init(serverfields::hashpoolthreadcount,hashresultqueue,hashencodedbufferlen,resulteventfd);
-    SERVERASSERT(threadsinit);
+    SERVERASSERT(threadsinit,"Hashpool init failure");
     
     //initialize the database
     int dbinit = serverdatabase.init(hashencodedbufferlen - 1,resulteventfd); //the actual hash length without the null terminator
     if (!dbinit) return false;
 
     //Check if connection states follow the correct order required by the transition table
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::NONE) == 0);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::UNAUTH) == 1);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::IDLE) == 2);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::INMATCH) == 3);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::DEAD) == 4);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::LOGINDB) == 5);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::LOGINHASH) == 6);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPDBCHECK) == 7);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPHASH) == 8);
-    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPDBWRITE) == 9);
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::NONE) == 0,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::UNAUTH) == 1,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::IDLE) == 2,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::INMATCH) == 3,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::DEAD) == 4,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::LOGINDB) == 5,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::LOGINHASH) == 6,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPDBCHECK) == 7,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPHASH) == 8,"Connection states order violation");
+    SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPDBWRITE) == 9,"Connection states order violation");
 
     //This invariant ensures that a connection does not spin on buffer being filled by a buggy/malicious packet
-    SERVERASSERT(serverfields::MAXpacketsize + 4 <= serverfields::CLIENTREADbufsizemax);
 
     LOGINFO("Listenerfd (%d) and Epollfd(%d) set, server init completed.",listenerfd,epollfd);
     return true;
@@ -253,7 +253,7 @@ int server::processevents(epoll_event& event) {
                 }
 
                 else {
-                    SERVERASSERT(unauthconncount <= serverfields::MAXunauthconnlimit);
+                    SERVERASSERT(unauthconncount <= serverfields::MAXunauthconnlimit, "unauth connections exceeded their cap");
                     if (unauthconncount == serverfields::MAXunauthconnlimit) {
                         char addrbuf[INET_ADDRSTRLEN];
                         fillIP(addrbuf,sizeof addrbuf,theiraddr);
@@ -297,8 +297,6 @@ int server::processevents(epoll_event& event) {
                     newconn->polloutactive = false;
                     newconn->connfd = newfd;
                     newconn->connid = clientsid;
-                    newconn->rbreadindex = 0;
-                    newconn->rbwriteindex = 0;
                     newconn->type = epollfdtype::CONNECTION; //Parent basefd type
                     
                     newconn->lastseen = now();
@@ -327,7 +325,7 @@ int server::processevents(epoll_event& event) {
                     unauthqueue.push_back(clientsid);
 
                     auto [connit,conninserted] = connectionsmap.try_emplace(clientsid,std::move(newconn));
-                    SERVERASSERT(conninserted == true); //since clientsid is incremented per client, for a new conn, the entry cannot exist
+                    SERVERASSERT(conninserted == true,"Map connection insert failed, entry already exists?"); //since clientsid is incremented per client, for a new conn, the entry cannot exist
                     clientsid++;
                 }
             }
@@ -338,8 +336,7 @@ int server::processevents(epoll_event& event) {
             //we reset the counter to 0 so that future signals can wake the loop again
             uint64_t val;
             ssize_t bytesread;
-            
-            bytesread = read(resulteventfd,&val,sizeof val);
+            bytesread = eventfd_read(resulteventfd,&val);
             //read failure above is fatal in all cases
             //the eventfd counter is not consumed by any thread, process etc. between epoll_wait
             //and reading, this means EAGAIN or EWOULDBLOCK are a violation of this invariant
@@ -347,10 +344,10 @@ int server::processevents(epoll_event& event) {
             if (bytesread == -1) {
                 int errnum = errno;
                 LOGERRORNUM(errnum, "eventfd read failed!");
-                SERVERASSERT(0);
+                SERVERFAIL("Closing server due to eventfd read failure!");
             }
             
-            SERVERASSERT(static_cast<size_t>(bytesread) == sizeof val);
+            SERVERASSERT(static_cast<size_t>(bytesread) == sizeof val,"");
         }
         else {
             connection * c = static_cast<connection *>(base);
@@ -360,7 +357,27 @@ int server::processevents(epoll_event& event) {
     if (event.events & EPOLLOUT) {
         connection * c = static_cast<connection *>(base);
         if (static_cast<connection *>(base)->alive == true) {
-            flushwb(c);
+            flushresult fres = flushbytes(c->connfd,c->writebuffer);
+            switch (fres.status) {
+                case flushstatus::ERROR : {
+                    LOGWARNINGNUM(fres.errcode,"Socket error while writing on client(%s), dropping client!");
+                    markdead(c);
+                    break;
+                }
+                case flushstatus::FULLFLUSH : {
+                    setepollout(c,false);
+                    break;
+                }
+                case flushstatus::PARTIALFLUSH :
+                case flushstatus::SOSENDBUFFERFULL : {
+                    setepollout(c,true);
+                    break;
+                }
+                default : {
+                    SERVERFAIL("Unknown enum status returned by fillwritebuffer(...)");
+                    break;
+                }
+            }
         } 
     }
 
@@ -369,47 +386,36 @@ int server::processevents(epoll_event& event) {
 
 void server::handlemessage(connection * c) {
     if (c->alive == false) return;
+    readresult r = fillreadbuffer(c->connfd,c->readbuffer);
 
-    while (true) {
-        size_t remaining = serverfields::CLIENTREADbufsizemax - c->rbwriteindex;
-
-        if (remaining == 0) {
-            //the read buffer has filled up, break
-            break;
+    switch(r.status) {
+        case readstatus::ERROR : {
+            LOGWARNINGNUM(r.errcode,"recv() failure on client (%s)!",c->tag);
+            markdead(c);
+            return; 
         }
-
-        ssize_t bytes = recv(c->connfd,c->readbuffer + c->rbwriteindex,remaining,0);
-
-        if (bytes == -1) {
-            int errnum = errno;
-            if (errnum == EAGAIN || errnum == EWOULDBLOCK) {
-                break;
-            }
-            else {
-                LOGWARNINGNUM(errnum,"recv() failure on client (%s)!",c->tag);
-                markdead(c);
-                return;
-            }
-        }
-        else if (bytes == 0) {
-            //FIN packet sent by client
+        case readstatus::SOCKETFIN : {
             LOGINFO("client(%s) closed their connection (FIN)!",c->tag);
             markdead(c);
             return;
         }
-
-        else {
-            //the bytes are written to the read buffer, updating the write index
-            c->rbwriteindex += bytes;
+        case readstatus::READBUFFERFULL :
+        case readstatus::DONE : {
+            //parse
+            break;
+        }
+        default : {
+            SERVERFAIL("Unknown readstatus enum value!");
+            return;
         }
     }
-
+    
     //now the buffer is ready to be read
     while (true) {
         //CHANGE: A handler can now markdead a connection, guard after every message handled
-        parsedata parsemsg = parse(c->readbuffer,c->rbreadindex,c->rbwriteindex);
+        parsedata parsemsg = parse(c->readbuffer);
         
-        if (parsemsg.res == parseresult::INCOMPLETEMESSAGE) {
+        if (parsemsg.res == parseresult::INCOMPLETEMESSAGE || parsemsg.res == parseresult::ALLREAD) {
             break;
         }
         else if (parsemsg.res == parseresult::OUTOFBOUNDSMSG) {
@@ -417,8 +423,11 @@ void server::handlemessage(connection * c) {
             markdead(c);
             return;
         }
-        else {
+        else if (parsemsg.res == parseresult::SUCCESS) {
             LOGINFO("Succesfully parsed incoming packet for '%s'!",c->tag);
+        }
+        else {
+            SERVERFAIL("Unknown parseresult enum value!");
         }
 
         switch(parsemsg.payloadtype) {
@@ -445,18 +454,7 @@ void server::handlemessage(connection * c) {
         }
     }
 
-    if (c->rbreadindex == c->rbwriteindex) {
-        c->rbreadindex = 0;
-        c->rbwriteindex = 0;
-    }
-
-    if (c->rbreadindex > 0) {
-        //this branch will run if incomplete messages are present in the readbuffer.
-        size_t tomove = c->rbwriteindex - c->rbreadindex;
-        memmove(c->readbuffer,c->readbuffer+c->rbreadindex,tomove);
-        c->rbreadindex = 0;
-        c->rbwriteindex = tomove;
-    }
+    c->readbuffer.compact();
 
 }
 //MARKDEAD NEVER DELETES, just sets alive to false
@@ -480,7 +478,7 @@ void server::markdead(connection * c) {
 
     //IP counts are only decremented in markdead, and incremented on accept
     //markdead called on a connection MUST have its corresponding ipmap entry alive as non zero count does not reap it
-    SERVERASSERT(pit!=ipmap.end()); 
+    SERVERASSERT(pit!=ipmap.end(),"Live connection has no IP map entry keyed by its addr field"); 
     pit->second->count -= 1;
     //evaluate tokens before checking
 
@@ -494,8 +492,8 @@ void server::markdead(connection * c) {
 }
 
 void server::deletesession(Session * s) {
-    SERVERASSERT(tokenmap.erase(s->token));
-    SERVERASSERT(sessionmap.erase(s->accountid));
+    SERVERASSERT(tokenmap.erase(s->token),"Token entry corresponding to session being deleted does not exist");
+    SERVERASSERT(sessionmap.erase(s->accountid),"Deletesession handed an already dead/removed session");
 }
 
 void server::reap() {
@@ -540,7 +538,7 @@ void server::reap() {
     while (sessheadsentinel.next != &sesstailsentinel) {
         //In the session expiry linked list, only an inactive session must be present
         Session * s = sessheadsentinel.next;
-        SERVERASSERT(s->sessionactive == false);
+        SERVERASSERT(s->sessionactive == false,"Active session found in session expiry list");
         if ((authnow - s->lastseen) >= serverfields::sessiontimeout) {
             //connections can be deemed 'dead' at any point within the epoll batch, but sessions can
             //always be used and have a single point of expiry, so they do not have a markdead() equivalent
@@ -570,7 +568,7 @@ void server::reap() {
         ev.events = EPOLLIN;
         int enablelistener = epoll_ctl(epollfd,EPOLL_CTL_MOD,listenerfd,&ev);
 
-        SERVERASSERT(enablelistener!=-1);
+        SERVERASSERT(enablelistener!=-1,"Listener re-enable failed");
         listenerdisabled = false;
 
         LOGINFO("Connection(s) dropped, re-enabled EPOLLIN on listenerfd!");
@@ -584,7 +582,7 @@ void server::reap() {
     //safety check, moved to bottom because markdead decrements that unauth/auth counts
     //eagerly. originally at the top is would abort instantly since connections were not removed
     //above IP sweep so that the ASSERT fires every reap cycle
-    SERVERASSERT(static_cast<size_t>(authconncount + unauthconncount) == connectionsmap.size());
+    SERVERASSERT(static_cast<size_t>(authconncount + unauthconncount) == connectionsmap.size(),"");
 
     if (now() - lastipsweeptime < serverfields::ipsweepinterval) return;
     lastipsweeptime = now();
@@ -609,7 +607,7 @@ void server::changestate(connection * conn,serverfields::connstates newstate) {
     serverfields::connstates oldstate = conn->state;
 
     //Invalid transitions are a result of a failure in proper state management handling by the server code
-    SERVERASSERT(isvalidtransition(oldstate,newstate));
+    SERVERASSERT(isvalidtransition(oldstate,newstate),"Invalid state transition from %d to %d on Client(%s)",static_cast<int>(oldstate),static_cast<int>(newstate),conn->tag);
 
     if (isunauth(oldstate) && isauth(newstate)) {
         //authentication success
@@ -633,7 +631,7 @@ void server::changestate(connection * conn,serverfields::connstates newstate) {
 }
 
 void server::connectionnodelink(connection * nodep) {
-    SERVERASSERT((nodep->next == nullptr) && (nodep->prev == nullptr));
+    SERVERASSERT((nodep->next == nullptr) && (nodep->prev == nullptr),"connection node being linked is not fully unlinked");
     nodep->next = &conntailsentinel;
     nodep->prev = conntailsentinel.prev;
     conntailsentinel.prev->next = nodep;
@@ -641,7 +639,7 @@ void server::connectionnodelink(connection * nodep) {
 }
 
 void server::connectionnodeunlink(connection * nodep) {
-    SERVERASSERT((nodep->next != nullptr) && (nodep->prev != nullptr));
+    SERVERASSERT((nodep->next != nullptr) && (nodep->prev != nullptr),"connection node being unlinked is not fully linked");
     nodep->next->prev = nodep->prev;
     nodep->prev->next = nodep->next;
     nodep->next = nullptr;
@@ -658,7 +656,7 @@ void server::connectionnodeshifttail(connection * nodep) {
 }
 
 void server::sessionnodelink(Session * nodep) {
-    SERVERASSERT((nodep->next == nullptr) && (nodep->prev == nullptr));
+    SERVERASSERT((nodep->next == nullptr) && (nodep->prev == nullptr),"session node being linked is not fully unlinked");
     nodep->next = &sesstailsentinel;
     nodep->prev = sesstailsentinel.prev;
     sesstailsentinel.prev->next = nodep;
@@ -666,7 +664,7 @@ void server::sessionnodelink(Session * nodep) {
 }
 
 void server::sessionnodeunlink(Session * nodep) {
-    SERVERASSERT((nodep->next != nullptr) && (nodep->prev != nullptr));
+    SERVERASSERT((nodep->next != nullptr) && (nodep->prev != nullptr),"session node being unlinked is not fully linked");
     nodep->prev->next = nodep->next;
     nodep->next->prev = nodep->prev;
     nodep->next = nullptr;
@@ -723,55 +721,6 @@ void server::setepollout(connection * c,bool yes) {
     }
 }
 
-ssize_t server::sendbytes(connection * c,size_t tosend) {
-    ssize_t bytessent = send(c->connfd,c->writebuffer.getsentpointer(),tosend,MSG_NOSIGNAL);
-    if (bytessent == -1) {
-        int errnum = errno;
-        if (errnum == EAGAIN || errnum == EWOULDBLOCK) {
-            //send buffer is already full
-            setepollout(c,true);
-            return -1;
-        }
-        else {
-            markdead(c);
-            return -1;
-        }
-    }
-
-    return bytessent;
-}
-void server::flushwb(connection * c) {
-    SERVERASSERT(c->alive == true); //This method only operates on alive clients, it is the caller's responsibility to ensure so
-    size_t contiguousslots = c->writebuffer.totalcontiguousfilledslots();
-    ssize_t bytessent;
-    if ((bytessent = sendbytes(c,contiguousslots)) == -1) return;
-
-    if (static_cast<size_t>(bytessent) < contiguousslots) {
-        setepollout(c,true);
-        c->writebuffer.consumeslots(static_cast<size_t>(bytessent));
-        return;
-    }
-    else if (contiguousslots == c->writebuffer.count) {
-        //all bytes sent in single send call
-        c->writebuffer.consumeslots(static_cast<size_t>(bytessent));
-        setepollout(c,false);
-        return;
-    }
-    
-    c->writebuffer.consumeslots(contiguousslots);
-    //all contiguous bytes sent, but slots to send still remain, sentpointer wraps around to 0
-    contiguousslots = c->writebuffer.totalcontiguousfilledslots();
-    if ((bytessent = sendbytes(c,contiguousslots)) == -1) return;
-    c->writebuffer.consumeslots(static_cast<size_t>(bytessent));
-
-    if (static_cast<size_t>(bytessent) < contiguousslots) {
-        setepollout(c,true);
-        return;
-    }
-
-    setepollout(c,false);
-}
-
 void server::broadcastshutdown() {
     for (auto& connpair:connectionsmap) {
         messages::servershutdownpacket msg;
@@ -784,10 +733,10 @@ void server::broadcastshutdown() {
 //Any connection can only have a single pre auth job in flight at a time and in such intermediate states, other packets are ignored
 //Dead connections never get to reach the handlers and their results are popped and skipped
 void server::dbresultloginhandler(connection * c, dbresultentry& res) {
-    SERVERASSERT(c->state == serverfields::connstates::LOGINDB);
+    SERVERASSERT(c->state == serverfields::connstates::LOGINDB,"");
     if (res.status == dbresultstatus::SUCCESS) {
         resultverifyparams * p = std::get_if<resultverifyparams>(&res.params);
-        SERVERASSERT(p != nullptr);
+        SERVERASSERT(p != nullptr,"Variant of login read async job not properly set to the right params struct (resultverifyparams)");
         changestate(c,serverfields::connstates::LOGINHASH);
         hthreadpool.submithashverificationjob(c->connid,res.accountid,c->passwordbuf,p->hash);
 
@@ -799,12 +748,12 @@ void server::dbresultloginhandler(connection * c, dbresultentry& res) {
         sendmessage(c,response);
     }    
     else {
-        SERVERASSERT(0);
+        SERVERFAIL("Unknown result status for async database job (login read)");
     }
 }
 
 void server::dbresultusercheckhandler(connection * c,dbresultentry& res) {
-    SERVERASSERT(c->state == serverfields::connstates::SIGNUPDBCHECK);
+    SERVERASSERT(c->state == serverfields::connstates::SIGNUPDBCHECK,"");
     if (res.status == dbresultstatus::SUCCESS) {
         changestate(c,serverfields::connstates::UNAUTH);
         messages::serversignupresponse response(network::servresponse::SIGNUPNAMETAKEN);
@@ -817,16 +766,16 @@ void server::dbresultusercheckhandler(connection * c,dbresultentry& res) {
         explicit_bzero(c->passwordbuf.buf,sizeof c->passwordbuf.buf);
     }
     else {
-        SERVERASSERT(0);
+        SERVERFAIL("Unknown result status for async database job (Signup read)");
     }
 }
 
 
 void server::dbresultnewuserhandler(connection * c,dbresultentry& res) {
-    SERVERASSERT(c->state == serverfields::connstates::SIGNUPDBWRITE);
+    SERVERASSERT(c->state == serverfields::connstates::SIGNUPDBWRITE,"");
     if (res.status == dbresultstatus::SUCCESS) {
         //if the write succeeded, account id should be non-zero
-        SERVERASSERT(res.accountid != 0);
+        SERVERASSERT(res.accountid != 0,"Database new user write did not set the account id of the entered row");
         attachsession(c,serverfields::sessioncreationstage::FROMSIGNUP,res.accountid);
     }
     else if (res.status == dbresultstatus::WRITEFAILEDUNIQUE) {
@@ -835,7 +784,7 @@ void server::dbresultnewuserhandler(connection * c,dbresultentry& res) {
         sendmessage(c,response);
     }
     else {
-        SERVERASSERT(0);
+        SERVERFAIL("Unknown result status for async database job (Signup write)");
     }
 }
 
@@ -843,7 +792,7 @@ void server::dbresultgetusercachehandler(connection * c, Session * s,dbresultent
     //POST AUTH JOB, reaching here means that the session is alive and the issuing connection may or may not be alive
     //mutate the session first
     resultgetcacheparams * respointer = std::get_if<resultgetcacheparams>(&res.params);
-    SERVERASSERT(respointer != nullptr);
+    SERVERASSERT(respointer != nullptr,"Variant of session cache read async job not properly set to the right params struct (resultgetcacheparams)");
 
     s->cache.username = respointer->username;
     s->cache.email = respointer->email;
@@ -852,12 +801,12 @@ void server::dbresultgetusercachehandler(connection * c, Session * s,dbresultent
     s->cachefilled = true;
 
     if (s->sessionactive) {
-        if (c->alive != true) {
+        if (c == nullptr) {
             //the issuing connection has been replaced by another connection
             //since the session is active, the new connection must be alive
-            SERVERASSERT((c = getaliveconnptr(s->activeconnectionid)) != nullptr);
+            SERVERASSERT((c = getaliveconnptr(s->activeconnectionid)) != nullptr, "Session active despite being attached to a dead connection");
         }
-        SERVERASSERT(c->state == serverfields::connstates::SESSIONCACHEGET);
+        SERVERASSERT(c->state == serverfields::connstates::SESSIONCACHEGET,"");
         changestate(c,serverfields::connstates::IDLE);
         sendlobbyinfo(c,s->cache.username,s->cache.email,s->cache.playeremblems);
     }
@@ -945,7 +894,7 @@ void server::checkresults() {
                 break;
             }
             default : {
-                SERVERASSERT(0);
+                SERVERFAIL("Unknown job type for database async operation result");
             }
         }
 
@@ -993,7 +942,7 @@ void server::checkresults() {
                     sendmessage(c,response);
                 }
                 else {
-                    SERVERASSERT(0);
+                    SERVERFAIL("Unknown job result status for hashpool async operation result");
                 }
             }
         }
@@ -1013,10 +962,13 @@ void server::checkresults() {
                     sendmessage(c,response);
                 }
                 else {
-                    SERVERASSERT(0);
+                    SERVERFAIL("Unknown job result status for hashpool async operation result");
                 }
             }
 
+        }
+        else {
+            SERVERFAIL("Unknown job type for hashpool async operation result");
         }
 
         hashresults.pop();
@@ -1033,13 +985,13 @@ bool server::isauth(serverfields::connstates state) {
 }
 
 void server::attachsession(connection * c,serverfields::sessioncreationstage stage,uint64_t accid) {   
-    SERVERASSERT(c->alive == true);
+    SERVERASSERT(c->alive == true,"attachsession got a dead connection");
     sessiontokenpair tokens;
 
     if (stage != serverfields::sessioncreationstage::FROMTOKEN) {
         while (true) {
             std::optional<sessiontokenpair> p = gettokens();
-            SERVERASSERT(p != std::nullopt);
+            SERVERASSERT(p != std::nullopt, "Random token generation failed");
 
             tokens = p.value();
             if (!tokenmap.count(tokens.hashedtoken)) break;
@@ -1055,20 +1007,20 @@ void server::attachsession(connection * c,serverfields::sessioncreationstage sta
             //If so, this method's logic ensures that the reconnecting client was not takenover by any other client
             //By the time it returned. Thus from the time the reconnecting client was markded dead to the time they try
             //to reconnect, the session was inactive.
-            if (stage == serverfields::sessioncreationstage::FROMTOKEN) SERVERASSERT(s->sessionactive == false);
+            if (stage == serverfields::sessioncreationstage::FROMTOKEN) SERVERASSERT(s->sessionactive == false, "Reconnecting client token still in tokenmap, yet client was taken over");
 
             if (s->sessionactive) {
                 uint64_t oldconnid = s->activeconnectionid;
                 auto old = connectionsmap.find(oldconnid);
 
                 //an active connection always has an alive connection
-                SERVERASSERT(old != connectionsmap.end() && old->second->alive == true);
+                SERVERASSERT(old != connectionsmap.end() && old->second->alive == true,"Active session has a dead connection attached to it");
                 messages::servernewconntakeoverpacket packet;
                 sendmessage(old->second.get(),packet);
                 markdead(old->second.get());
 
                 //delete the original hashed token from the tokenmap
-                SERVERASSERT(tokenmap.erase(s->token)); //the session token MUST exist in the map
+                SERVERASSERT(tokenmap.erase(s->token), "Alive session does not have a corresponding token in tokenmap"); //the session token MUST exist in the map
             }
 
             s->activeconnectionid = c->connid;
@@ -1109,10 +1061,11 @@ void server::attachsession(connection * c,serverfields::sessioncreationstage sta
     changestate(c,serverfields::connstates::SESSIONCACHEGET);
     serverdatabase.submitfetchusercachejob(c->connid,accid);
 
+    //INCREMENT THE COUNTER 
     newsess->outboundasyncjobs++;
 
     auto [sessionit,sessioninserted] = sessionmap.try_emplace(accid,std::move(newsess));
-    SERVERASSERT(sessioninserted == true);
+    SERVERASSERT(sessioninserted == true,"");
     
     c->sess = sessionit->second.get();
     tokenmap.emplace(tokens.hashedtoken,accid);
@@ -1125,10 +1078,10 @@ void server::attachsession(connection * c,serverfields::sessioncreationstage sta
 //THE INVARIANT: ONLY LIVE AUTHENTICATED CONNECTIONS MAY TRY TO FETCH A SESSION VIA A CONNECTION *
 //SUCH CONNECTIONS ALWAYS HAVE A VALID NON NULL SESSION * ASSOCIATED WITH THEM WHOSE ACTIVE CONNECTION ID IS THE CONNECTIONS'S ITSELF
 Session * server::getsession(connection * c) {
-    SERVERASSERT(c->alive == true);
-    SERVERASSERT(c->sess != nullptr);
-    SERVERASSERT(isauth(c->state));
-    SERVERASSERT(c->sess->activeconnectionid == c->connid);
+    SERVERASSERT(c->alive == true,"Trying to fetch a session from a dead connection");
+    SERVERASSERT(c->sess != nullptr,"Trying to fetch a session from a connection not linked to one (nullptr)");
+    SERVERASSERT(isauth(c->state), "Trying to fetch a connection from an UNAUTH connection");
+    SERVERASSERT(c->sess->activeconnectionid == c->connid, "Trying to fetch a session from a connection which is not the session's active connection");
     return c->sess;
 }
 
@@ -1144,8 +1097,8 @@ void server::sendlobbyinfo(connection * c, fixedcharbuffer<network::maxcredentia
 
 //runs whenever a post auth job (session associated) result arrives
 void server::sessionpostauthtrydelete(Session * s) {
-    SERVERASSERT(s != nullptr);
-    SERVERASSERT(s->outboundasyncjobs > 0);
+    SERVERASSERT(s != nullptr, "");
+    SERVERASSERT(s->outboundasyncjobs > 0, "Try delete in response to post auth session bound result already finds no outbound session bound async jobs");
     s->outboundasyncjobs--;
     if (s->clearingoutboundjobs && s->outboundasyncjobs == 0) {
         deletesession(s);
