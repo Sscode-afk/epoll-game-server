@@ -100,6 +100,8 @@ bool server::init() {
 
     sessheadsentinel.next = &sesstailsentinel;
     sesstailsentinel.prev = &sessheadsentinel;
+    sessheadsentinel.dirtynext = &sesstailsentinel;
+    sesstailsentinel.dirtyprev = &sessheadsentinel;
 
     size_t hashencodedbufferlen = argon2_encodedlen(serverfields::t_cost,serverfields::m_cost,serverfields::parallelism,serverfields::saltlen,serverfields::hashlen,Argon2_id);
     SERVERASSERT(hashencodedbufferlen <= serverfields::hashresultbufsize,"Insufficient hash buffer size");
@@ -147,6 +149,11 @@ void server::run() {
             epoll_event& event = eventbuffer[i];
             int processresult = processevents(event);
             if (processresult == -1) return;
+        }
+
+        if (now() - lastsessionupdateflush >= serverfields::sessionupdateflushinterval) {
+            lastsessionupdateflush = 0;
+            flushdirtysessions();
         }
 
         reap();
@@ -492,6 +499,15 @@ void server::markdead(connection * c) {
 }
 
 void server::deletesession(Session * s) {
+    if (s->dirty == true) {
+        //if the connection is inactive, then activeconnectionid i
+        serverdatabase.submitupdateusercachejob(s->activeconnectionid,s->accountid,s->cache.playeremblems);
+        s->outboundasyncjobs++;
+        s->dirty = false;
+        sessionnodeunlink(s,true); //unlink after pushing the update job
+        return;
+    }
+
     SERVERASSERT(tokenmap.erase(s->token),"Token entry corresponding to session being deleted does not exist");
     SERVERASSERT(sessionmap.erase(s->accountid),"Deletesession handed an already dead/removed session");
 }
@@ -564,7 +580,8 @@ void server::reap() {
     //IF connections will be cleared and listener is disabled
     if (!toremove.empty() && listenerdisabled) {
         epoll_event ev;
-        ev.data.ptr = nullptr;
+        basefd * listenerptr = &listener;
+        ev.data.ptr = listenerptr;
         ev.events = EPOLLIN;
         int enablelistener = epoll_ctl(epollfd,EPOLL_CTL_MOD,listenerfd,&ev);
 
@@ -655,16 +672,38 @@ void server::connectionnodeshifttail(connection * nodep) {
     connectionnodelink(nodep);
 }
 
-void server::sessionnodelink(Session * nodep) {
-    SERVERASSERT((nodep->next == nullptr) && (nodep->prev == nullptr),"session node being linked is not fully unlinked");
+void server::sessionnodelink(Session * nodep,bool dirtylink) {
+    if (dirtylink) {
+        SERVERASSERT((nodep->dirtynext == nullptr) && (nodep->dirtyprev == nullptr),"session node being linked to dirty list is not fully unlinked");
+        nodep->dirtynext = &sesstailsentinel;
+        nodep->dirtyprev = sesstailsentinel.dirtyprev;
+        sesstailsentinel.dirtyprev->dirtynext = nodep;
+        sesstailsentinel.dirtyprev = nodep;
+
+        dirtysessionslistsize++;
+        return;
+    }
+    
+    SERVERASSERT((nodep->next == nullptr) && (nodep->prev == nullptr),"session node being linked to expiry list is not fully unlinked");
     nodep->next = &sesstailsentinel;
     nodep->prev = sesstailsentinel.prev;
     sesstailsentinel.prev->next = nodep;
     sesstailsentinel.prev = nodep;
 }
 
-void server::sessionnodeunlink(Session * nodep) {
-    SERVERASSERT((nodep->next != nullptr) && (nodep->prev != nullptr),"session node being unlinked is not fully linked");
+void server::sessionnodeunlink(Session * nodep,bool dirtyunlink) {
+    if (dirtyunlink) {
+        SERVERASSERT((nodep->dirtynext != nullptr) && (nodep->dirtyprev != nullptr),"session node being unlinked from dirty list is not fully linked");
+        nodep->dirtyprev->dirtynext = nodep->dirtynext;
+        nodep->dirtynext->dirtyprev = nodep->dirtyprev;
+        nodep->dirtynext = nullptr;
+        nodep->dirtyprev = nullptr;
+
+        dirtysessionslistsize--;
+        return;
+    }
+
+    SERVERASSERT((nodep->next != nullptr) && (nodep->prev != nullptr),"session node being unlinked from expiry list is not fully linked");
     nodep->prev->next = nodep->next;
     nodep->next->prev = nodep->prev;
     nodep->next = nullptr;
@@ -869,11 +908,19 @@ void server::checkresults() {
         }  
         
         essential::dbdispatcherparams p = analyzedbresulttype(res);
-        bool discard = (p.type == essential::dbdispatcherresult::SESSIONBOUNDJOB && p.sessptr == nullptr) || (p.type == essential::dbdispatcherresult::NONSESSIONBOUNDJOB && p.connptr == nullptr);
-        if (discard) {
-            dbresults.pop();
-            continue;
-        } 
+        //No session can die while a session bound job was out
+        if (p.type == essential::dbdispatcherresult::SESSIONBOUNDJOB) {
+            SERVERASSERT(p.sessptr != nullptr, "Session died while a SESSION BOUND job's result had still not been processed");
+        }
+        else if (p.type == essential::dbdispatcherresult::NONSESSIONBOUNDJOB) {
+            if (p.connptr == nullptr) {
+                dbresults.pop();
+                continue;
+            }
+        }
+        else {
+            SERVERFAIL("Unknown dispatcher enum value for database result type");
+        }
 
         //all non fatal packets have a jobtype set
         switch (res.resultjob) {
@@ -898,7 +945,8 @@ void server::checkresults() {
             }
         }
 
-        if (p.type == essential::dbdispatcherresult::SESSIONBOUNDJOB && p.sessptr != nullptr) {
+        if (p.type == essential::dbdispatcherresult::SESSIONBOUNDJOB) {
+            SERVERASSERT(p.sessptr != nullptr, "DB result analyzer provided null session pointer while session bound async operation was still out.");
             sessionpostauthtrydelete(p.sessptr);
         }
 
@@ -1103,4 +1151,25 @@ void server::sessionpostauthtrydelete(Session * s) {
     if (s->clearingoutboundjobs && s->outboundasyncjobs == 0) {
         deletesession(s);
     }
+}
+
+void server::mutatesessioncache(Session * s, uint64_t emblemsnew) {
+    SERVERASSERT(s!=nullptr, "NULL session pointer handed to mutate method");
+    SERVERASSERT(s->sessionactive != false, "Inactive session handed to mutate method");
+
+    s->cache.playeremblems = emblemsnew;
+    if (!s->dirty) {
+        sessionnodelink(s,true);
+        s->dirty = true;
+    }
+}
+
+void server::flushdirtysessions() {
+    while (sessheadsentinel.dirtynext != &sesstailsentinel) {
+        Session * s = sessheadsentinel.dirtynext;
+        sessioncacheupdatejobbuffer.push(serverdatabase.prepareusercacheupdatejob(s->activeconnectionid,s->accountid,s->cache.playeremblems));
+        s->dirty = false;
+        sessionnodeunlink(s,true);
+    }
+    serverdatabase.submitusercacheupdatebatch(sessioncacheupdatejobbuffer);
 }

@@ -42,11 +42,15 @@ struct Session {
     bool cachefilled = false;
     bool clearingoutboundjobs = false;
     bool sessionactive = false;
+    bool dirty = false;
 
     uint32_t outboundasyncjobs = 0;
 
     Session * next = nullptr;
     Session * prev = nullptr;
+
+    Session * dirtynext = nullptr;
+    Session * dirtyprev = nullptr;
 
     Session(uint64_t conn,uint64_t accid,uint64_t now,sessiontoken& tok) {
         activeconnectionid = conn;

@@ -62,8 +62,8 @@ class server {
         void connectionnodeunlink(connection * nodep);
         void connectionnodeshifttail(connection * nodep);
 
-        void sessionnodelink(Session * nodep);
-        void sessionnodeunlink(Session * nodep);
+        void sessionnodelink(Session * nodep,bool dirtylink = false);
+        void sessionnodeunlink(Session * nodep,bool dirtyunlink = false);
 
         int getepollwaittimeout();
 
@@ -93,6 +93,13 @@ class server {
         Session * getsession(connection * c);
         void deletesession(Session * s);
         void sessionpostauthtrydelete(Session * s);
+
+        size_t dirtysessionslistsize = 0;
+        std::queue<dbwriteentry> sessioncacheupdatejobbuffer;
+        void mutatesessioncache(Session *,uint64_t emblemsnew);
+        void flushdirtysessions();
+
+        uint64_t lastsessionupdateflush = 0;
     public: 
         server();
         ~server();

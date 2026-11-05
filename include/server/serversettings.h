@@ -45,4 +45,5 @@ namespace serverfields {
     enum class sessioncreationstage {FROMLOGIN,FROMSIGNUP,FROMTOKEN};
 
     inline const uint64_t sessiontimeout = 172800000; //2 days in ms
+    inline const uint64_t sessionupdateflushinterval = 4000; //4 seconds
 }

@@ -468,7 +468,7 @@ void database::submitfetchusercachejob(uint64_t connid,uint64_t accid) {
  
 }
 
-void database::submitupdateusercachejob(uint64_t connid,uint64_t accountid,uint64_t emblems) {
+dbwriteentry database::prepareusercacheupdatejob(uint64_t connid,uint64_t accountid,uint64_t emblems) {
     dbwriteentry writejob;
     writejob.connid = connid;
     writejob.accountid = accountid;
@@ -479,8 +479,25 @@ void database::submitupdateusercachejob(uint64_t connid,uint64_t accountid,uint6
     writejob.params.emplace<writeupdatecacheparams>(params);
 
     SERVERASSERT(writejob.accountid != 0, "DATABASE: accountid not set for postauth job");
+    return writejob;
+}
+
+void database::submitupdateusercachejob(uint64_t connid,uint64_t accountid,uint64_t emblems) {
+    dbwriteentry writejob = prepareusercacheupdatejob(connid,accountid,emblems);
     std::lock_guard<std::mutex> lck(mtx);
     writequeue.push(std::move(writejob));
+}
+
+void database::submitusercacheupdatebatch(std::queue<dbwriteentry>& updatejobsqueue) {
+    std::lock_guard<std::mutex> lck(mtx);
+    if (writequeue.empty()) {
+        writequeue.swap(updatejobsqueue);
+        return;
+    }
+    while (!updatejobsqueue.empty()) {
+        writequeue.push(std::move(updatejobsqueue.front()));
+        updatejobsqueue.pop();
+    }
 }
 
 database::~database() {
