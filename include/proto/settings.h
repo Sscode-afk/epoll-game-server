@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 namespace network {
     inline const char * PORT = "5555";
     inline constexpr size_t mincredentialsize = 7;
@@ -20,4 +21,8 @@ namespace network {
 
     inline constexpr size_t clientreadbuffersizemax = 16 * 1024;
     inline constexpr size_t clientwritebuffersizemax = 16 * 1024;
+
+    //ENSURE THEY MATCH
+    inline const uint16_t SERVERUDPPORT = 6666;
+    inline const char * SERVERUDPPORTSTRING = "6666";
 }

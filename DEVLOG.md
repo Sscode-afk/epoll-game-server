@@ -443,3 +443,15 @@ So what I did was refactor them and put them inside a new net.h header (with imp
 The server and client separately can then use the common methods, and switch on the result.
 
 This has also made the code look cleaner and has a nice property that now those same methods can be tested in isolation without having to have mock connection objects and server specific methods that mutate connections.
+
+# 9/10/26
+
+Building the client has been mostly something I have already dealt with in the past. While the scope of the client itself is small, I still implemented a state based pattern using dynamic polymorphism via a common state abstract class. the states that inherit from this run the essential event, logic and render handlers in the game loop that holds a unique pointer to anyone of these child states. I had done exactly this in past small SFML projects.
+
+I also decided to implement UDP discovery for clients on the same local network as the server to find it's IP in order to establish the main TCP connection. I won't be hosting the server, so LAN is the current scope. The basic idea is that the client will continously send UDP packets over the local network. the server will itself have a UDP thread that will block on receiving datagrams. When a UDP packet from a client arrives, the server will respond back on that same address. This way the client gets the IP of the server.
+But UDP discovery was not that easy. While reading up on it, I learned about their being different types of broadcast addresses. Depending on the device, there can be multiple network interfaces and each interface has its own broadcast address. 
+255.255.255.255 is also a broadcast address, however when a UDP packet is sent on this address, the operating system selects any one of the active interfaces. So if the ethernet interface is selected for example, then users on the same wifi as the server will not be able to find the server.
+
+The standard solution to above is to go through each interface and find its individual broadcast address. Store those addresses and while sending, send the udp packet via each interface (the OS maps the broadcast address to the interface).
+To understand above, I had to re-read the material from my networking course about netmasks etc.
+In the client at init, the program stores all the valid broadcast addresses (ignore the loopback interface) once. Then it can be used to transmit packets.

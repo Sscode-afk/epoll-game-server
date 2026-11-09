@@ -1,5 +1,6 @@
 #pragma once
 #include <unistd.h>
+#include <filesystem>
 namespace serverfields {
     inline const size_t EPEVENTbufsize = 128;
     
@@ -46,4 +47,13 @@ namespace serverfields {
 
     inline const uint64_t sessiontimeout = 172800000; //2 days in ms
     inline const uint64_t sessionupdateflushinterval = 4000; //4 seconds
+
+    inline std::filesystem::path databasepath;
+    inline constexpr uint64_t udpthreadruntimeok = 60 * 1000; //60 seconds run time is valid
+    inline uint8_t udprunshortrestartcount = 0;
+    inline constexpr uint8_t maxudploopretries = 5;
+
+    inline uint16_t udpsleepduration = 1;
+    inline uint16_t udpmaxsleep = 60; //seconds
+    inline uint16_t udpminsleep = 1;
 }

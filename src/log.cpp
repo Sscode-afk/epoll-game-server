@@ -2,8 +2,8 @@
 #define _GNU_SOURCE
 #endif
 
-#include "core/log.h"
-#include <time.h>
+#include "log.h"
+#include "timer.h"
 #include <stdio.h>
 #include <cstring>
 #include <unistd.h>
@@ -13,6 +13,11 @@ static std::mutex logmtx;
 
 void setloglevel(loglevel lvl) {
     lglvl = lvl;
+}
+
+void setlogfd(int fd) {
+    std::lock_guard<std::mutex> lck(logmtx);
+    logfd = fd;
 }
 
 const char * getloglevel(loglevel lvl) {
@@ -77,7 +82,7 @@ struct appender {
             }
 
             buf[n] = '\n';
-            write(2,buf,n+1);
+            write(logfd,buf,n+1);
         }
 };
 void vlog_write(loglevel lvl,int errnum,const char * file,int line,const char * fmt,va_list args) {

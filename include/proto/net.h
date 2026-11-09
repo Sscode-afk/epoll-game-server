@@ -71,3 +71,13 @@ fillmessageresult fillwritebuffer(Payload& data,circularwritebuffer& buf,int fd)
 
     return res;
 }
+
+enum class socktype {TCP,UDP};
+int getsockfd(socktype type,const char * port);
+
+struct setnbresult {
+    bool success = false;
+    int errnum = -1;
+};
+
+setnbresult setnonblocking(int fd);

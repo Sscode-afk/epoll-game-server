@@ -1,7 +1,7 @@
 #include "server/server.h"
 #include "server/connection.h"
 #include "proto/wire.h"
-#include "core/log.h"
+#include "proto/log.h"
 #include "proto/parser.h"
 #include <vector>
 

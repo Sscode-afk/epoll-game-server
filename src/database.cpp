@@ -2,12 +2,13 @@
 #include <sqlite3.h>
 #include <filesystem>
 #include <string>
-#include "core/log.h"
+#include "proto/log.h"
 #include <cstring>
 #include "server/corestructures.h"
 #include "server/serversettings.h"
 #include "proto/objects.h"
 #include "sys/eventfd.h"
+#include "server/session.h"
 
 void database::dbinterr(int errcode, const char * stage) {
     LOGERROR("DATABASE: Sqlite error on %s : %s",stage,sqlite3_errstr(errcode));
@@ -333,11 +334,8 @@ bool database::init(size_t encodelength, int efd) {
     SERVERASSERT(hashencodedlength > 0, "DATABASE: encodelength parameter is invalid");
     SERVERASSERT(resulteventfd >= 0, "DATABASE: eventfd parameter is invalid");
 
-    std::filesystem::path dbpath = "database/server.db";
-    if (!std::filesystem::is_directory(dbpath.parent_path())) {
-        LOGERROR("DATABASE: Database directory (%s) does not exist!",std::filesystem::absolute(dbpath.parent_path()).c_str());
-        return false;
-    }
+
+    std::filesystem::path dbpath = std::filesystem::path(serverfields::databasepath.c_str()) / "server.db";
 
     int status = sqlite3_open_v2(dbpath.c_str(),&db,SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_CREATE,nullptr);
 
@@ -453,37 +451,40 @@ void database::submituserexistencejob(uint64_t connid, fixedcharbuffer<network::
     readqueue.push(std::move(readjob));
 }
 
-void database::submitfetchusercachejob(uint64_t connid,uint64_t accid) {
+void database::submitgetsessioncachejob(Session * s) {
+    //Session pointer must be valid, its validity must be ensured by the caller
     dbreadentry readjob;
-    readjob.connid = connid;
-    readjob.accountid = accid;
+    readjob.connid = s->activeconnectionid;
+    readjob.accountid = s->accountid;
     readjob.entrytype = dbjobtype::READUSERCACHE;
 
     readusercacheparams params;
     readjob.params.emplace<readusercacheparams>(params);
+    SERVERASSERT(readjob.accountid != 0,"DATABASE: accountid not set for postauth job"); //session bound job must have an accid
 
-    SERVERASSERT(readjob.accountid != 0,"DATABASE: accountid not set for postauth job"); //post auth job must have an accid  
     std::lock_guard<std::mutex> lck(mtx);
     readqueue.push(std::move(readjob));
- 
+    s->outboundasyncjobs++;
 }
 
-dbwriteentry database::prepareusercacheupdatejob(uint64_t connid,uint64_t accountid,uint64_t emblems) {
+dbwriteentry database::prepareusercacheupdatejob(Session * s) {
     dbwriteentry writejob;
-    writejob.connid = connid;
-    writejob.accountid = accountid;
+    writejob.connid = s->activeconnectionid;
+    writejob.accountid = s->accountid;
     writejob.entrytype = dbjobtype::WRITEUSERCACHE;
     
     writeupdatecacheparams params;
-    params.emblems = emblems;
+    params.emblems = s->cache.playeremblems;
     writejob.params.emplace<writeupdatecacheparams>(params);
 
     SERVERASSERT(writejob.accountid != 0, "DATABASE: accountid not set for postauth job");
+    //preparation is always followed by submission
+    s->outboundasyncjobs++;
     return writejob;
 }
 
-void database::submitupdateusercachejob(uint64_t connid,uint64_t accountid,uint64_t emblems) {
-    dbwriteentry writejob = prepareusercacheupdatejob(connid,accountid,emblems);
+void database::submitupdateusercachejob(Session * s) {
+    dbwriteentry writejob = prepareusercacheupdatejob(s);
     std::lock_guard<std::mutex> lck(mtx);
     writequeue.push(std::move(writejob));
 }

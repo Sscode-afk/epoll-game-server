@@ -1,7 +1,7 @@
 #pragma once
 #include <time.h>
 #include <stdint.h>
-#include "core/log.h"
+#include "log.h"
 #include <inttypes.h>
 
 enum class timerprecision {MILLI,MICRO};

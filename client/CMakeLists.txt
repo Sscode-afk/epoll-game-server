@@ -1,5 +1,6 @@
 add_library(client_lib STATIC
     src/game.cpp
+    src/state.cpp
 )
 target_include_directories(client_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -25,3 +26,4 @@ add_executable(client src/main.cpp)
 target_link_libraries(client_lib PUBLIC common_proto project_warnings)
 target_link_libraries(client_lib PUBLIC SFML::Graphics)
 target_link_libraries(client PRIVATE client_lib)
+target_compile_definitions(client PRIVATE PROJECT_ROOT_DIRECTORY="${PROJECT_ROOT_DIRECTORY}")

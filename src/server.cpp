@@ -1,7 +1,6 @@
 #include "server/server.h"
-#include "server/socket.h"
 #include "server/connection.h"
-#include "core/log.h"
+#include "proto/log.h"
 #include <errno.h>
 #include "server/serversettings.h"
 #include <fcntl.h>
@@ -12,13 +11,15 @@
 #include "proto/wire.h"
 #include "core/tools.h"
 #include "server/corestructures.h"
-#include "core/time.h"
+#include "proto/timer.h"
 #include <algorithm>
 #include "core/threadpool.h"
 #include "core/database.h"
 #include "server/session.h"
 #include <sys/eventfd.h>
 #include "proto/net.h"
+#include <chrono>
+#include <algorithm>
 
 extern "C" {
     #include <argon2.h>
@@ -35,11 +36,13 @@ server::server() {
 
     reservefd = -1;
     resulteventfd = -1;
+    udpcloseeventfd = -1;
 
     lastipsweeptime = now();
 
     listener.type = epollfdtype::LISTENER;
     wakeupevent.type = epollfdtype::RESULT;
+    udpevent.type = epollfdtype::UDPCLOSE;
 }
 
 server::~server() {
@@ -50,6 +53,7 @@ server::~server() {
     if (listenerfd >= 0) close(listenerfd);
     if (reservefd >= 0) close(reservefd);
     if (resulteventfd >= 0) close(resulteventfd);
+    if (udpcloseeventfd >= 0) close(udpcloseeventfd);
 }
 
 bool server::init() {
@@ -63,7 +67,12 @@ bool server::init() {
         LOGERRORNUM(errnum,"eventfd open err!");
         return false;
     }
-    if ((listenerfd = getlistenerfd()) == -1) {
+    if ((udpcloseeventfd = eventfd(0,EFD_NONBLOCK)) == -1) {
+        int errnum = errno;
+        LOGERRORNUM(errnum,"udpclose eventfd open err!");
+        return false;
+    }
+    if ((listenerfd = getsockfd(socktype::TCP,network::PORT)) == -1) {
         return false;
     }
 
@@ -73,6 +82,18 @@ bool server::init() {
         return false;
     }
     
+    if (listen(listenerfd,SOMAXCONN) == -1) {
+        int errnum  = errno;
+        LOGERRORNUM(errnum,"listen() error on listening socket!");
+        return false;
+    }
+
+    setnbresult r = setnonblocking(listenerfd);
+    if (r.success == false) {
+        LOGERRORNUM(r.errnum,"setnonblocking() err on listening socket");
+        return false;
+    }
+
     epoll_event listenerevent;
     listenerevent.events = EPOLLIN;
     basefd * listenerptr = &listener;
@@ -92,6 +113,17 @@ bool server::init() {
     if (epoll_ctl(epollfd,EPOLL_CTL_ADD,resulteventfd,&resultevent) == -1) {
         int errnum = errno;
         LOGERRORNUM(errnum,"resultevent epoll_ctl_add err!");
+        return false;
+    }
+
+    epoll_event udpcloseevent;
+    udpcloseevent.events = EPOLLIN;
+    basefd * udpcloseeventptr = &udpevent;
+    udpcloseevent.data.ptr = udpcloseeventptr;
+
+    if (epoll_ctl(epollfd,EPOLL_CTL_ADD,udpcloseeventfd,&udpcloseevent) == -1) {
+        int errnum = errno;
+        LOGERRORNUM(errnum,"udpcloseevent epoll_ctl_add err!");
         return false;
     }
 
@@ -128,9 +160,65 @@ bool server::init() {
     SERVERASSERT(static_cast<size_t>(serverfields::connstates::SIGNUPDBWRITE) == 9,"Connection states order violation");
 
     //This invariant ensures that a connection does not spin on buffer being filled by a buggy/malicious packet
+    SERVERASSERT(network::MAXpacketsize + 4 <= network::clientreadbuffersizemax,"");
+
+    UDPthread = std::thread(&server::udpworker,this);
 
     LOGINFO("Listenerfd (%d) and Epollfd(%d) set, server init completed.",listenerfd,epollfd);
     return true;
+}
+
+void server::udpworker() {
+    uint16_t sleeptime;
+    {
+        std::lock_guard<std::mutex> lck(udpworkermtx);
+        sleeptime = serverfields::udpsleepduration;
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(sleeptime));
+    LOGINFO("UDPLOOP: udpworker starting execution");
+    uint64_t starttime = now();
+
+    int newfd = getsockfd(socktype::UDP,network::SERVERUDPPORTSTRING);
+    if (newfd == -1) {
+        seteventfd(udpcloseeventfd,"UDPLOOP",now() - starttime);
+        return;
+    }
+
+    sockaddr_in clientaddr;
+    socklen_t addrsize;
+    while (true) {
+        messages::clientudpdiscoverypacket packet;
+        addrsize = sizeof clientaddr;
+        ssize_t bytesreceived = recvfrom(newfd,&packet,sizeof packet,0,(sockaddr *)&clientaddr,&addrsize);
+        if (bytesreceived == -1) {
+            int errnum = errno;
+            if (errnum == EBADF || errnum == ENOTSOCK || errnum == EINVAL) {
+                //only stop for fatal errors
+                LOGERRORNUM(errnum,"UDPLOOP: Closing UPD worker");
+                seteventfd(udpcloseeventfd,"UDPLOOP",now() - starttime);
+                return;
+            }
+            else continue;
+        }
+        else {
+            char buf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET,&clientaddr.sin_addr.s_addr,buf,INET_ADDRSTRLEN);
+            LOGINFO("Received UDP broadcast packet from IP: %s",buf);
+            
+            messages::serverudpresponse responsepacket;
+            ssize_t bytessent = sendto(newfd,&responsepacket,sizeof responsepacket,MSG_NOSIGNAL,(sockaddr *)&clientaddr,addrsize);
+            if (bytessent == -1) {
+                int errnum = errno;
+                if (errnum == EBADF || errnum == ENOTSOCK || errnum == EINVAL) {
+                    LOGERRORNUM(errnum,"UDPLOOP: Closing UPD worker");
+                    seteventfd(udpcloseeventfd,"UDPLOOP",now() - starttime);
+                    return;
+                }
+                else continue;
+            }
+        }
+    }
 }
 
 void server::run() {
@@ -289,7 +377,8 @@ int server::processevents(epoll_event& event) {
                     }
                     ippointer->tb.tokens = std::clamp(ippointer->tb.tokens - serverfields::accepttokencost,0.0,ippointer->tb.capacity);
 
-                    if (setnonblocking(newfd) == false) {
+                    setnbresult r = setnonblocking(newfd);
+                    if (r.success == false) {
                         close(newfd);
                         continue;
                     }
@@ -338,23 +427,43 @@ int server::processevents(epoll_event& event) {
             }
             
         }
+        else if (base->type == epollfdtype::UDPCLOSE && runudploop) {
+            uint64_t udpthreadruntime = readeventfd(udpcloseeventfd,"UDPLOOP");
+            if (udpthreadruntime >= serverfields::udpthreadruntimeok) {
+                serverfields::udprunshortrestartcount = 0;
+                {
+                    std::lock_guard<std::mutex> lck(udpworkermtx);
+                    serverfields::udpsleepduration = std::max(serverfields::udpminsleep,static_cast<uint16_t>(serverfields::udpsleepduration/2));
+                }
+            }
+            else {
+                {
+                    std::lock_guard<std::mutex> lck(udpworkermtx);
+                    serverfields::udpsleepduration = std::min(static_cast<uint16_t>(serverfields::udpsleepduration * 2),serverfields::udpmaxsleep);
+
+                }
+                serverfields::udprunshortrestartcount++;
+
+                if (serverfields::udprunshortrestartcount >= serverfields::maxudploopretries) {
+                    runudploop = false;
+                }
+            }
+
+            if (UDPthread.joinable()) {
+                UDPthread.join();
+            }
+
+            if (runudploop) UDPthread = std::thread(&server::udpworker,this);
+        }
+
         else if (base->type == epollfdtype::RESULT) {
             //eventfd was set, it's only job was to signal the epoll loop to wake up.
             //we reset the counter to 0 so that future signals can wake the loop again
-            uint64_t val;
-            ssize_t bytesread;
-            bytesread = eventfd_read(resulteventfd,&val);
             //read failure above is fatal in all cases
             //the eventfd counter is not consumed by any thread, process etc. between epoll_wait
             //and reading, this means EAGAIN or EWOULDBLOCK are a violation of this invariant
             //since event fd is set with the flag EFD_NONBLOCK, the read cannot be interrupted
-            if (bytesread == -1) {
-                int errnum = errno;
-                LOGERRORNUM(errnum, "eventfd read failed!");
-                SERVERFAIL("Closing server due to eventfd read failure!");
-            }
-            
-            SERVERASSERT(static_cast<size_t>(bytesread) == sizeof val,"");
+            readeventfd(resulteventfd,"SERVER");
         }
         else {
             connection * c = static_cast<connection *>(base);
@@ -501,8 +610,7 @@ void server::markdead(connection * c) {
 void server::deletesession(Session * s) {
     if (s->dirty == true) {
         //if the connection is inactive, then activeconnectionid i
-        serverdatabase.submitupdateusercachejob(s->activeconnectionid,s->accountid,s->cache.playeremblems);
-        s->outboundasyncjobs++;
+        serverdatabase.submitupdateusercachejob(s);
         s->dirty = false;
         sessionnodeunlink(s,true); //unlink after pushing the update job
         return;
@@ -866,14 +974,14 @@ essential::dbdispatcherparams server::analyzedbresulttype(dbresultentry& res) {
     essential::dbdispatcherparams p;
     //check if issuing connection is alive
     connection * c = getaliveconnptr(res.connid);
-    bool resultispostauth;
-    if ((resultispostauth = issessionboundjob(res.resultjob)) == true) p.type = essential::dbdispatcherresult::SESSIONBOUNDJOB;
+    bool resultissessionbound;
+    if ((resultissessionbound = issessionboundjob(res.resultjob)) == true) p.type = essential::dbdispatcherresult::SESSIONBOUNDJOB;
     else p.type = essential::dbdispatcherresult::NONSESSIONBOUNDJOB;
 
     if (c == nullptr) {
         p.connptr = nullptr;
         //issuing connection is dead
-        if (resultispostauth) {
+        if (resultissessionbound) {
             auto sessionit = sessionmap.find(res.accountid);
             if (sessionit == sessionmap.end()) p.sessptr = nullptr;
             else p.sessptr = sessionit->second.get();
@@ -884,7 +992,7 @@ essential::dbdispatcherparams server::analyzedbresulttype(dbresultentry& res) {
     }
     else {
         p.connptr = c;
-        if (resultispostauth) {
+        if (resultissessionbound) {
             //a POST auth job is linked to an auth connection
             p.sessptr = getsession(p.connptr);
         }
@@ -938,6 +1046,9 @@ void server::checkresults() {
             }
             case dbjobtype::READUSERCACHE : {
                 dbresultgetusercachehandler(p.connptr,p.sessptr,res);
+                break;
+            }
+            case dbjobtype::WRITEUSERCACHE : {
                 break;
             }
             default : {
@@ -1107,10 +1218,7 @@ void server::attachsession(connection * c,serverfields::sessioncreationstage sta
     newsess->sessionactive = true;
 
     changestate(c,serverfields::connstates::SESSIONCACHEGET);
-    serverdatabase.submitfetchusercachejob(c->connid,accid);
-
-    //INCREMENT THE COUNTER 
-    newsess->outboundasyncjobs++;
+    serverdatabase.submitgetsessioncachejob(newsess.get());
 
     auto [sessionit,sessioninserted] = sessionmap.try_emplace(accid,std::move(newsess));
     SERVERASSERT(sessioninserted == true,"");
@@ -1167,7 +1275,8 @@ void server::mutatesessioncache(Session * s, uint64_t emblemsnew) {
 void server::flushdirtysessions() {
     while (sessheadsentinel.dirtynext != &sesstailsentinel) {
         Session * s = sessheadsentinel.dirtynext;
-        sessioncacheupdatejobbuffer.push(serverdatabase.prepareusercacheupdatejob(s->activeconnectionid,s->accountid,s->cache.playeremblems));
+        sessioncacheupdatejobbuffer.push(serverdatabase.prepareusercacheupdatejob(s));
+        //preparation increments the outbound async job count
         s->dirty = false;
         sessionnodeunlink(s,true);
     }

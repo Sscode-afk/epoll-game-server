@@ -7,7 +7,7 @@
 #include "proto/settings.h"
 #include "server/session.h"
 
-enum class epollfdtype {LISTENER,RESULT,CONNECTION};
+enum class epollfdtype {LISTENER,RESULT,CONNECTION,UDPCLOSE};
 
 struct basefd {
     epollfdtype type;

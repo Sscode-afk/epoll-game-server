@@ -9,6 +9,8 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES )
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
+set(PROJECT_ROOT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
 add_library(project_warnings INTERFACE)
 target_compile_options(project_warnings INTERFACE -Wall -Wextra -Wshadow -Wconversion "-fmacro-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=") #STRIPS from __FILE__
 
@@ -19,8 +21,6 @@ if (ENABLE_SANITIZERS)
 endif()
 
 add_library(server_lib STATIC
-    src/log.cpp
-    src/socket.cpp
     src/server.cpp
     src/tools.cpp
     src/threadpool.cpp
@@ -35,12 +35,14 @@ target_link_libraries(server_lib PRIVATE project_warnings argon2 sqlite3 crypto)
 add_library(common_proto STATIC 
     src/parser.cpp
     src/net.cpp
+    src/log.cpp
 )
 target_include_directories(common_proto PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/proto)
 
 add_executable(server src/main.cpp)
 target_link_libraries(server_lib PUBLIC common_proto)
 target_link_libraries(server PRIVATE server_lib project_warnings)
+target_compile_definitions(server PRIVATE PROJECT_ROOT_DIRECTORY="${PROJECT_ROOT_DIRECTORY}")
 
 option(BUILD_CLIENT "Build the client" ON)
 if (BUILD_CLIENT) 

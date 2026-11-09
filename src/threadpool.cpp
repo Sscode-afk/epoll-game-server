@@ -4,8 +4,9 @@
 #include <vector>
 #include <optional>
 #include <sys/random.h>
-#include "core/log.h"
+#include "proto/log.h"
 #include <sys/eventfd.h>
+#include "core/tools.h"
 extern "C" {
     #include <argon2.h>
 }
@@ -99,15 +100,7 @@ void hashpool::work(essential::threadsafequeue<essential::hashresultentry>& resq
         }
 
         //After pushing in either case, notify the main thread
-        uint64_t val = 1;
-        ssize_t evwrite = eventfd_write(resulteventfd,val);
-        if (evwrite == -1) {
-            int errnum = errno;
-            LOGERRORNUM(errnum,"HASHPOOL: eventfd write err!");
-            SERVERFAIL("HASHPOOL: Eventfd write failure");
-        }
-
-        SERVERASSERT(static_cast<size_t>(evwrite) == sizeof val,"");
+        seteventfd(resulteventfd,"HASHPOOL");
     }
 }
 

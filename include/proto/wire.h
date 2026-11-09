@@ -48,4 +48,12 @@ namespace messages {
         char email[network::maxemailsize + 1];
         uint64_t emblems;
     };
+
+    struct __attribute__((packed)) clientudpdiscoverypacket {
+        uint8_t type = 20;
+    };
+
+    struct __attribute__((packed)) serverudpresponse {
+        uint8_t type = 21;
+    };
 }

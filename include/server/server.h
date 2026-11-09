@@ -11,7 +11,7 @@
 
 #include "server/session.h"
 #include "proto/net.h"
-#include "core/log.h"
+#include "proto/log.h"
 
 class server {
     private:
@@ -19,12 +19,17 @@ class server {
         int listenerfd;
         int reservefd;
         int resulteventfd;
+        int udpcloseeventfd;
+        int UDPfd;
 
         int unauthconncount;
         int authconncount;
 
         basefd listener;
         basefd wakeupevent;
+        basefd udpevent;
+
+        std::mutex udpworkermtx;
         
         uint64_t clientsid;
 
@@ -100,6 +105,10 @@ class server {
         void flushdirtysessions();
 
         uint64_t lastsessionupdateflush = 0;
+
+        std::thread UDPthread;
+        void udpworker();
+        bool runudploop = true;
     public: 
         server();
         ~server();

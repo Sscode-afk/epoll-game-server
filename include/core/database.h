@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <thread>
 #include "core/threadpool.h"
+#include "server/session.h"
 
 enum class dbjobtype {READLOGINVERIFY,READUSERCACHE,READCHECKIFUSEREXISTS,WRITEUSERCACHE,WRITENEWUSER};
 enum class dbresultstatus {SUCCESS,READNOTFOUND,WRITEFAILEDUNIQUE,FAILEDFATAL};
@@ -135,9 +136,10 @@ struct database {
         void submitloginauthjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username);
         void submitsignupjob(uint64_t connid,fixedcharbuffer<network::maxcredentialsize + 1>& username,fixedcharbuffer<network::maxemailsize + 1>& email, fixedcharbuffer<serverfields::hashresultbufsize>& hash);
         void submituserexistencejob(uint64_t connid, fixedcharbuffer<network::maxcredentialsize + 1>& username);
-        void submitfetchusercachejob(uint64_t connid,uint64_t accountid);
-        dbwriteentry prepareusercacheupdatejob(uint64_t connid, uint64_t accountid,uint64_t emblems);
-        void submitupdateusercachejob(uint64_t connid,uint64_t accountid,uint64_t emblems);
+        void submitgetsessioncachejob(Session * s);
+
+        dbwriteentry prepareusercacheupdatejob(Session * s);
+        void submitupdateusercachejob(Session * s);
         void submitusercacheupdatebatch(std::queue<dbwriteentry>& updatejobsqueue);
 
         void killdb();

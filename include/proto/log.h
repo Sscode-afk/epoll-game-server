@@ -19,6 +19,9 @@ inline loglevel lglvl = loglevel::DEBUG;
 void setloglevel(loglevel lvl);
 const char * getloglevel(loglevel lvl);
 
+inline int logfd = 2;
+void setlogfd(int fd);
+
 void vlog_write(loglevel lvl,int errnum,const char * file,int line,const char * fmt,va_list args);
 
 __attribute__((format(printf,4,5)))
